@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper and software artifact as below."
+title: "Epistemic Ecology Runtime (EER)"
+abstract: >-
+  A high-performance Python/Numba numerical framework implementing a strictly
+  convex variational solver for belief aggregation on directed epistemic graphs,
+  with SCC consensus, cascade and cycle regularization, and bounded-delay
+  asynchronous scheduling.
+version: 0.1.0
+date-released: 2026-09-09
+license: MIT
+repository-code: "https://github.com/myosettnaing/epistemic-ecology-runtime"
+url: "https://github.com/myosettnaing/epistemic-ecology-runtime"
+
+authors:
+  - family-names: "Naing"
+    given-names: "Myo Sett"
+    orcid: "https://orcid.org/0009-0002-9133-0058"
+
+preferred-citation:
+  type: article
+  title: "A Strictly Convex Variational Framework for Belief Aggregation on Static Directed Epistemic Graphs"
+  authors:
+    - family-names: "Naing"
+      given-names: "Myo Sett"
+      orcid: "https://orcid.org/0009-0002-9133-0058"
+  year: 2026
+  month: 9
+  notes: "Preprint"
