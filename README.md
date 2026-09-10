@@ -21,6 +21,84 @@ consensus constraints, cascade regularizers, and fundamental cycle closures.
 
 EER uses a decoupled edge-buffering graph structure, vectorized block-COO
 sparse Extended Hessian assembly, and Numba-JIT coordinate descent solvers
+with incremental $O(\text{deg})$ residual updating.
+
+---
+
+## ✨ Key Features
+
+- **Memory-efficient graph core (`EpistemicGraph`)**: Decoupled edge-list
+  buffering eliminates memory overhead during dynamic graph construction.
+- **Vectorized block-COO Hessian assembly**: Constructs
+  $$H_{\text{ext}} = H_0 + H_{\text{SCC}} + \alpha Q_{\text{cascade}} + \gamma Q_{\text{cycle}}$$
+  (eq. 9) in vectorized $O(\vert{}C\vert{}^2)$ block-COO matrix format.
+- **Structural regularizers**:
+  - $Q_{\text{cascade}}$: Depth-bounded DFS path enumeration with memory-efficient
+    backtracking over directed derivation cascades ($\vert{}p\vert{} \le L_{\max}$, eq. 15).
+  - $Q_{\text{cycle}}$: Fundamental cycle basis construction with
+    **alternating signed incidence** $b_\sigma(v_k) = (-1)^k$ to prevent
+    sign cancellation (eq. 17).
+- **Numba-JIT hybrid scheduler**: Mandatory cyclic backbone
+  sweep ($M$-period) combined with aged residual priority updates for fast box-constrained convergence.
+- **Parallel calibration (`FastGridSearchCalibrator`)**: Surrogate grid search 
+  with pre-cached structural matrices for fast multi-core parameter estimation $(\alpha, \gamma)$.
+
+---
+
+## 🛠️ Tech Stack
+
+- **Python**: 3.11+
+- `numpy >= 1.24.0`
+- `scipy >= 1.10.0`
+- `numba >= 0.57.0`
+- `networkx >= 3.0`
+- `joblib >= 1.2.0`
+- `pyyaml >= 6.0`
+
+---
+
+## 📁 Repository Structure
+
+```text
+epistemic-ecology-runtime/
+├── .github/workflows/test.yml
+├── eer/
+│   ├── __init__.py
+│   ├── core_graph.py
+│   ├── hessian_builder.py
+│   ├── schedulers.py
+│   ├── calibration.py
+│   └── utils.py
+├── tests/
+│   ├── conftest.py
+│   ├── test_core_graph.py
+│   ├── test_cycle.py
+│   ├── test_hessian.py
+│   └── test_scheduler.py
+├── benchmarks/
+│   ├── run_benchmarks.py
+│   └── format_benchmark.py
+├── Dockerfile
+├── environment.yml
+├── pyproject.toml
+├── CITATION.cff
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── LICENSE
+└── README.md
+
+---
+
+## 📌 Overview
+
+The **Epistemic Ecology Runtime (EER)** implements a strictly convex
+variational solver for belief aggregation on directed epistemic graphs. It
+optimizes belief vectors $\mathbf{x} \in [0,1]^n$ against prior
+distributions, contradiction penalties, strongly connected component (SCC)
+consensus constraints, cascade regularizers, and fundamental cycle closures.
+
+EER uses a decoupled edge-buffering graph structure, vectorized block-COO
+sparse Extended Hessian assembly, and Numba-JIT coordinate descent solvers
 with incremental O(deg) residual updating.
 
 ---
