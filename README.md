@@ -1,6 +1,6 @@
 # Epistemic Ecology Runtime (EER)
 
-[![Tests][(https://github.com/myosettnaing/epistemic-ecology-runtime/](https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime)actions/workflows/test.yml/badge.svg)]
+[![Tests][(https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/actions/workflows/test.yml/badge.svg)]
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![ORCID](https://img.shields.io/badge/ORCID-0009--0002--9133--0058-green.svg)](https://orcid.org/0009-0002-9133-0058)
