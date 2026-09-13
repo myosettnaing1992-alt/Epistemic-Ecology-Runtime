@@ -1,164 +1,283 @@
-#!/usr/bin/env python3
-"""Automated Benchmark Suite for Epistemic Ecology Runtime (EER).
+"""
+Benchmark runner for EER.
 
-Compares projected Cyclic Gauss-Seidel (CGS) against the Numba hybrid
-priority coordinate-descent scheduler on sparse epistemic graphs.
+Compares three schedulers across three graph families:
+    - Cyclic Gauss-Seidel (CGS)
+    - Random priority
+    - Hybrid priority (Algorithm 4)
 
-Run:
+Outputs a JSON file with wall-clock time, update counts, and residual.
+
+Usage:
     python benchmarks/run_benchmarks.py
-
-Output:
-    benchmarks/results/benchmark_summary.csv
+    python benchmarks/run_benchmarks.py --smoke
+    python benchmarks/run_benchmarks.py --out results/benchmark.json
+    python benchmarks/run_benchmarks.py --graphs ba er mve --n 500 10000
 """
 
+from __future__ import annotations
+
+import argparse
+import json
+import platform
+import sys
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+from scipy.sparse import csr_matrix
 
-from eer.core_graph import EpistemicGraph
-from eer.hessian_builder import (
+# Add repo root to path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from eer import (                       # noqa: E402
+    EpistemicGraph,
     assemble_extended_hessian,
     build_cycle_matrix_fundamental,
+    run_cyclic_gs_scheduler,
+    run_hybrid_priority_scheduler_optimized,
+    run_random_priority_scheduler,
 )
-from eer.schedulers import run_hybrid_priority_scheduler_optimized
+from eer.utils import (                 # noqa: E402
+    make_ba_graph,
+    make_er_graph,
+    residual_inf,
+    set_random_priors,
+)
 
 
-# ---------------------------------------------------------------------------
-# Projected Cyclic Gauss-Seidel baseline
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Result container
+# ----------------------------------------------------------------------
 
-def run_cyclic_gauss_seidel(H_csr, b, max_sweeps=2000, tol=1e-6):
-    """Projected CGS with box constraints on [0, 1]."""
-    n = H_csr.shape[0]
-    x = np.full(n, 0.5, dtype=np.float64)
-    diag = H_csr.diagonal()
-
-    start = time.perf_counter()
-    sweeps = 0
-    for _ in range(max_sweeps):
-        max_diff = 0.0
-        for i in range(n):
-            row = slice(H_csr.indptr[i], H_csr.indptr[i + 1])
-            cols = H_csr.indices[row]
-            vals = H_csr.data[row]
-            s = np.dot(vals, x[cols]) - diag[i] * x[i]
-            x_new = (b[i] - s) / diag[i]
-            x_new = min(1.0, max(0.0, x_new))
-            diff = abs(x_new - x[i])
-            if diff > max_diff:
-                max_diff = diff
-            x[i] = x_new
-        sweeps += 1
-        if max_diff < tol:
-            break
-
-    return sweeps, time.perf_counter() - start, x
+@dataclass
+class BenchmarkRecord:
+    graph: str
+    n: int
+    m_S: int
+    method: str
+    wallclock_sec: float
+    coordinate_updates: int
+    final_residual: float
+    converged: bool
+    seed: int
 
 
-# ---------------------------------------------------------------------------
-# EER hybrid priority solver
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Graph builders
+# ----------------------------------------------------------------------
 
-def run_eer_solver(H_csr, b, max_sweeps=2000, tol=1e-6):
-    """Numba hybrid priority coordinate-descent solver."""
-    H_csc = H_csr.tocsc()
-    x0 = np.full(H_csr.shape[0], 0.5, dtype=np.float64)
+def build_mve_graph(n_nodes: int = 32) -> EpistemicGraph:
+    """Chain-like MVE graph (paper's small example)."""
+    import networkx as nx
+    G_nx = nx.path_graph(n_nodes)
+    g = EpistemicGraph(num_nodes=n_nodes)
+    set_random_priors(g, seed=0)
+    for u, v in G_nx.edges():
+        g.add_support_edge(int(u), int(v), 1.0)
+    return g
 
-    start = time.perf_counter()
-    x_star, total_updates, _ = run_hybrid_priority_scheduler_optimized(
+
+def build_graph(kind: str, n: int, seed: int = 0) -> EpistemicGraph:
+    if kind == "mve":
+        return build_mve_graph(min(n, 32))
+
+    if kind == "ba":
+        G_nx = make_ba_graph(n, m=3, seed=seed)
+    elif kind == "er":
+        G_nx = make_er_graph(n, avg_deg=5.0, seed=seed)
+    else:
+        raise ValueError(f"Unknown graph kind: {kind}")
+
+    g = EpistemicGraph(num_nodes=n)
+    set_random_priors(g, seed=seed)
+    for u, v in G_nx.edges():
+        g.add_support_edge(int(u), int(v), 1.0)
+    return g
+
+
+# ----------------------------------------------------------------------
+# Assemble system once per (graph, n, seed)
+# ----------------------------------------------------------------------
+
+def assemble_system(
+    kind: str, n: int, seed: int = 0, gamma: float = 0.05
+) -> tuple[EpistemicGraph, csr_matrix, csr_matrix]:
+    g = build_graph(kind, n, seed=seed)
+    Q_cyc = build_cycle_matrix_fundamental(g, K_max=1000)
+    H = assemble_extended_hessian(g, gamma=gamma, Q_cycle=Q_cyc)
+    return g, H, Q_cyc
+
+
+# ----------------------------------------------------------------------
+# Single benchmark run
+# ----------------------------------------------------------------------
+
+def run_one(
+    kind: str,
+    n: int,
+    seed: int = 0,
+    tol: float = 1e-6,
+    max_sweeps: int = 100_000,
+    verbose: bool = False,
+) -> list[BenchmarkRecord]:
+
+    g, H, _ = assemble_system(kind, n, seed=seed)
+    H_csr = H.tocsr()
+    H_csc = H.tocsc()
+    b = g.b
+    x0 = np.full(n, 0.5, dtype=np.float64)
+
+    m_S = int(len(g._src))
+
+    records: list[BenchmarkRecord] = []
+
+    # ----------------------------------------------------------------
+    # 1. Cyclic Gauss-Seidel
+    # ----------------------------------------------------------------
+    if verbose:
+        print(f"  [CGS] n={n}...", end=" ", flush=True)
+    t0 = time.perf_counter()
+    x, updates, res = run_cyclic_gs_scheduler(
+        H, b, x0, tol=tol, max_sweeps=max_sweeps
+    )
+    t1 = time.perf_counter()
+    records.append(BenchmarkRecord(
+        graph=kind, n=n, m_S=m_S, method="cyclic_gs",
+        wallclock_sec=t1 - t0,
+        coordinate_updates=updates,
+        final_residual=res,
+        converged=res < tol,
+        seed=seed,
+    ))
+    if verbose:
+        print(f"{t1 - t0:.3f}s, updates={updates}, res={res:.2e}")
+
+    # ----------------------------------------------------------------
+    # 2. Random priority
+    # ----------------------------------------------------------------
+    if verbose:
+        print(f"  [RND] n={n}...", end=" ", flush=True)
+    t0 = time.perf_counter()
+    x, updates, res = run_random_priority_scheduler(
+        H, b, x0, tol=tol, max_updates=max_sweeps * n, seed=seed
+    )
+    t1 = time.perf_counter()
+    records.append(BenchmarkRecord(
+        graph=kind, n=n, m_S=m_S, method="random_priority",
+        wallclock_sec=t1 - t0,
+        coordinate_updates=updates,
+        final_residual=res,
+        converged=res < tol,
+        seed=seed,
+    ))
+    if verbose:
+        print(f"{t1 - t0:.3f}s, updates={updates}, res={res:.2e}")
+
+    # ----------------------------------------------------------------
+    # 3. Hybrid priority
+    # ----------------------------------------------------------------
+    if verbose:
+        print(f"  [HYP] n={n}...", end=" ", flush=True)
+    t0 = time.perf_counter()
+    x, updates, res = run_hybrid_priority_scheduler_optimized(
         H_csr.indptr, H_csr.indices, H_csr.data,
         H_csc.indptr, H_csc.indices, H_csc.data,
-        b, x0, M=H_csr.shape[0], epsilon=1e-3,
-        max_sweeps=max_sweeps, tol=tol,
+        b, x0,
+        M=n,
+        epsilon=1e-3,
+        tol=tol,
+        max_sweeps=max_sweeps,
     )
-    return total_updates, time.perf_counter() - start, x_star
+    t1 = time.perf_counter()
+    records.append(BenchmarkRecord(
+        graph=kind, n=n, m_S=m_S, method="hybrid_priority",
+        wallclock_sec=t1 - t0,
+        coordinate_updates=updates,
+        final_residual=res,
+        converged=res < tol,
+        seed=seed,
+    ))
+    if verbose:
+        print(f"{t1 - t0:.3f}s, updates={updates}, res={res:.2e}")
+
+    return records
 
 
-# ---------------------------------------------------------------------------
-# JIT warm-up
-# ---------------------------------------------------------------------------
-
-def warmup_jit():
-    n = 50
-    g = EpistemicGraph(n)
-    for i in range(n - 1):
-        g.add_support_edge(i, i + 1, 1.0)
-    H = assemble_extended_hessian(g, alpha=0.0, gamma=0.0)
-    _ = run_eer_solver(H, g.b, max_sweeps=5, tol=1e-2)
-
-
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--smoke", action="store_true",
+                   help="Fast run: mve only, tiny n.")
+    p.add_argument("--graphs", nargs="+", default=["mve", "ba", "er"],
+                   choices=["mve", "ba", "er"])
+    p.add_argument("--n", nargs="+", type=int, default=[32, 500, 10000])
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
+    p.add_argument("--out", type=str, default="results/benchmark.json")
+    p.add_argument("--tol", type=float, default=1e-6)
+    p.add_argument("--quiet", action="store_true")
+    return p.parse_args()
+
 
 def main():
-    results_dir = Path("benchmarks/results")
-    results_dir.mkdir(parents=True, exist_ok=True)
+    args = parse_args()
 
-    print("Warming up Numba JIT...")
-    warmup_jit()
-    print("JIT compilation complete.\n")
+    if args.smoke:
+        args.graphs = ["mve"]
+        args.n = [32]
+        args.seeds = [0]
 
-    node_scales = [1000, 10000, 50000]
-    n_seeds = 3
-    records = []
+    # Filter: skip huge n for smoke / small machines
+    configs: list[tuple[str, int]] = []
+    for kind in args.graphs:
+        for n in args.n:
+            if kind == "mve" and n > 32:
+                continue
+            configs.append((kind, n))
 
-    for n in node_scales:
-        cgs_times, eer_times = [], []
-        cgs_sweeps_list, eer_updates_list = [], []
+    all_records: list[BenchmarkRecord] = []
+    verbose = not args.quiet
 
-        for seed in range(42, 42 + n_seeds):
-            rng = np.random.default_rng(seed)
-            graph = EpistemicGraph(n)
-            graph.b = rng.uniform(0.0, 1.0, size=n)
-            graph.lambda_vec = rng.uniform(0.5, 2.0, size=n)
+    for kind, n in configs:
+        for seed in args.seeds:
+            if verbose:
+                print(f"\n=== Graph={kind}, n={n}, seed={seed} ===")
+            try:
+                recs = run_one(kind, n, seed=seed,
+                               tol=args.tol, verbose=verbose)
+                all_records.extend(recs)
+            except Exception as e:
+                print(f"  [FAIL] {kind} n={n} seed={seed}: {e}",
+                      file=sys.stderr)
 
-            for _ in range(n * 2):
-                u, v = rng.integers(0, n, size=2)
-                if u != v:
-                    graph.add_support_edge(
-                        int(u), int(v), float(rng.uniform(0.5, 1.5))
-                    )
+    # Persist
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "metadata": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "processor": platform.processor(),
+            "timestamp": time.time(),
+        },
+        "records": [asdict(r) for r in all_records],
+    }
+    with open(out_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"\nSaved → {out_path}")
 
-            Q_cyc = build_cycle_matrix_fundamental(graph)
-            H = assemble_extended_hessian(
-                graph, gamma=0.05, Q_cycle=Q_cyc
-            )
-
-            cgs_sw, cgs_t, _ = run_cyclic_gauss_seidel(H, graph.b)
-            eer_upd, eer_t, _ = run_eer_solver(H, graph.b)
-
-            cgs_sweeps_list.append(cgs_sw)
-            eer_updates_list.append(eer_upd)
-            cgs_times.append(cgs_t)
-            eer_times.append(eer_t)
-
-        mean_cgs_t, std_cgs_t = np.mean(cgs_times), np.std(cgs_times)
-        mean_eer_t, std_eer_t = np.mean(eer_times), np.std(eer_times)
-        speedup = mean_cgs_t / max(mean_eer_t, 1e-9)
-
-        records.append({
-            "Nodes": n,
-            "CGS_Sweeps": int(np.mean(cgs_sweeps_list)),
-            "EER_Updates": int(np.mean(eer_updates_list)),
-            "CGS_Time_s": round(mean_cgs_t, 4),
-            "CGS_Time_std": round(std_cgs_t, 4),
-            "EER_Time_s": round(mean_eer_t, 4),
-            "EER_Time_std": round(std_eer_t, 4),
-            "Speedup": round(speedup, 2),
-        })
-
-    df = pd.DataFrame(records)
-    csv_path = results_dir / "benchmark_summary.csv"
-    df.to_csv(csv_path, index=False)
-
-    print("=" * 70)
-    print(df.to_string(index=False))
-    print("=" * 70)
-    print(f"[OK] Saved to {csv_path}")
-    print("Next: python benchmarks/format_benchmark.py")
+    # Print summary
+    print("\n=== Summary ===")
+    print(f"{'graph':>6} {'n':>7} {'method':>18} "
+          f"{'wallclock':>10} {'updates':>10} {'residual':>12}")
+    for r in all_records:
+        print(f"{r.graph:>6} {r.n:>7} {r.method:>18} "
+              f"{r.wallclock_sec:>10.4f} {r.coordinate_updates:>10} "
+              f"{r.final_residual:>12.2e}")
 
 
 if __name__ == "__main__":
