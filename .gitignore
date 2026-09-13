@@ -245,3 +245,13 @@ config_local.yml
 tmp/
 temp/
 scratch/
+
+# Benchmark outputs
+
+benchmarks/results/*.json
+benchmarks/results/*.csv
+benchmarks/results/*.md
+!benchmarks/results/sample_benchmark.json
+!benchmarks/results/sample_benchmark.md
+!benchmarks/results/README.md
+!benchmarks/results/.gitkeep
