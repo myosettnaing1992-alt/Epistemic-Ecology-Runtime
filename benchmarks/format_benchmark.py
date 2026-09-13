@@ -1,112 +1,177 @@
-#!/usr/bin/env python3
-"""Format benchmark CSV into Markdown and inject into README.md.
+"""
+Format benchmark JSON into markdown tables for the README.
 
-Reads benchmarks/results/benchmark_summary.csv (schema produced by
-run_benchmarks.py) and replaces the block between:
-
-    <!-- BENCHMARK_TABLE_START -->
-    <!-- BENCHMARK_TABLE_END -->
+Reads results/benchmark.json (produced by run_benchmarks.py), aggregates
+across seeds, and emits a markdown table between BENCHMARK_TABLE_START
+and BENCHMARK_TABLE_END markers in README.md.
 
 Usage:
     python benchmarks/format_benchmark.py
-    python benchmarks/format_benchmark.py --print-only
+    python benchmarks/format_benchmark.py --in results/benchmark.json
+    python benchmarks/format_benchmark.py --stdout
+    python benchmarks/format_benchmark.py --update-readme
 """
 
+from __future__ import annotations
+
 import argparse
+import json
+import re
+import sys
+from collections import defaultdict
 from pathlib import Path
 
-import pandas as pd
+import numpy as np
 
 
-TABLE_START = "<!-- BENCHMARK_TABLE_START -->"
-TABLE_END = "<!-- BENCHMARK_TABLE_END -->"
+# ----------------------------------------------------------------------
+# Aggregation
+# ----------------------------------------------------------------------
+
+def aggregate(records: list[dict]) -> dict:
+    """
+    Aggregate records across seeds.
+
+    Returns: dict keyed by (graph, n, method) -> dict with mean/std of
+    wallclock and updates.
+    """
+    buckets: dict[tuple[str, int, str], list[dict]] = defaultdict(list)
+    for r in records:
+        key = (r["graph"], r["n"], r["method"])
+        buckets[key].append(r)
+
+    agg = {}
+    for key, rs in buckets.items():
+        wall = np.array([r["wallclock_sec"] for r in rs])
+        upds = np.array([r["coordinate_updates"] for r in rs])
+        res = np.array([r["final_residual"] for r in rs])
+        agg[key] = {
+            "wallclock_mean": float(wall.mean()),
+            "wallclock_std": float(wall.std()),
+            "updates_mean": float(upds.mean()),
+            "updates_std": float(upds.std()),
+            "residual_mean": float(res.mean()),
+            "n_seeds": len(rs),
+        }
+    return agg
 
 
-def format_summary(csv_path: Path) -> pd.DataFrame:
-    """Load the raw CSV and reshape it into a README-friendly DataFrame."""
-    raw = pd.read_csv(csv_path)
+# ----------------------------------------------------------------------
+# Markdown table
+# ----------------------------------------------------------------------
 
-    # Match the schema written by run_benchmarks.py
-    required = {
-        "Nodes", "CGS_Sweeps", "EER_Updates",
-        "CGS_Time_s", "CGS_Time_std",
-        "EER_Time_s", "EER_Time_std", "Speedup",
-    }
-    missing = required - set(raw.columns)
-    if missing:
-        raise ValueError(
-            f"CSV {csv_path} missing columns: {sorted(missing)}. "
-            f"Re-run `python benchmarks/run_benchmarks.py`."
-        )
-
-    return pd.DataFrame({
-        "Nodes ($n$)": raw["Nodes"].apply(lambda x: f"{int(x):,}"),
-        "CGS Sweeps": raw["CGS_Sweeps"].astype(int),
-        "EER Updates": raw["EER_Updates"].astype(int),
-        "CGS Time (s)": raw.apply(
-            lambda r: f"{r['CGS_Time_s']:.3f} ± {r['CGS_Time_std']:.3f}",
-            axis=1,
-        ),
-        "EER Time (s)": raw.apply(
-            lambda r: f"{r['EER_Time_s']:.3f} ± {r['EER_Time_std']:.3f}",
-            axis=1,
-        ),
-        "Speedup": raw["Speedup"].apply(lambda x: f"**{x:.2f}×**"),
-    })
+METHOD_LABELS = {
+    "cyclic_gs": "Cyclic GS",
+    "random_priority": "Random priority",
+    "hybrid_priority": "Hybrid priority",
+}
 
 
-def df_to_markdown(df: pd.DataFrame) -> str:
-    cols = list(df.columns)
-    header = "| " + " | ".join(cols) + " |"
-    sep = "| " + " | ".join([":---:"] * len(cols)) + " |"
-    rows = [
-        "| " + " | ".join(str(v) for v in row) + " |"
-        for row in df.itertuples(index=False, name=None)
-    ]
-    return "\n".join([header, sep, *rows])
+def to_markdown(agg: dict) -> str:
+    """
+    Build markdown table with columns:
+        Graph | n | Method | Wall-clock (s) | Updates | Speedup
+    Speedup is relative to Cyclic GS within each (graph, n) row group.
+    """
+    keys = sorted(agg.keys(), key=lambda k: (k[0], k[1], k[2]))
+
+    # Group by (graph, n)
+    groups: dict[tuple[str, int], dict[str, dict]] = defaultdict(dict)
+    for (graph, n, method), stats in agg.items():
+        groups[(graph, n)][method] = stats
+
+    lines = []
+    lines.append("| Graph | n | Method | Wall-clock (s) | Updates | Speedup |")
+    lines.append("|---|---|---|---|---|---|")
+
+    for (graph, n), methods in sorted(groups.items()):
+        baseline = methods.get("cyclic_gs")
+        if baseline is None:
+            continue
+        base_wall = baseline["wallclock_mean"]
+
+        for method in ["cyclic_gs", "random_priority", "hybrid_priority"]:
+            if method not in methods:
+                continue
+            s = methods[method]
+            wall = s["wallclock_mean"]
+            wall_std = s["wallclock_std"]
+            upd = int(s["updates_mean"])
+            speedup = base_wall / wall if wall > 0 else 0.0
+
+            lines.append(
+                f"| {graph.upper()} | {n} | {METHOD_LABELS[method]} "
+                f"| {wall:.3f} ± {wall_std:.3f} "
+                f"| {upd:,} "
+                f"| {speedup:.2f}x |"
+            )
+
+    return "\n".join(lines)
 
 
-def inject_into_readme(readme_path: Path, table_md: str) -> None:
+# ----------------------------------------------------------------------
+# README integration
+# ----------------------------------------------------------------------
+
+START = "<!-- BENCHMARK_TABLE_START -->"
+END = "<!-- BENCHMARK_TABLE_END -->"
+
+
+def update_readme(readme_path: Path, table: str) -> None:
     text = readme_path.read_text(encoding="utf-8")
-    if TABLE_START not in text or TABLE_END not in text:
+    if START not in text or END not in text:
         raise RuntimeError(
-            f"Markers not found in {readme_path}. "
-            f"Add '{TABLE_START}' and '{TABLE_END}' around the benchmark table."
+            f"README markers not found. Add '{START}' and '{END}'."
         )
-    pre, rest = text.split(TABLE_START, 1)
-    _, post = rest.split(TABLE_END, 1)
-    new_block = f"{TABLE_START}\n{table_md}\n{TABLE_END}"
-    readme_path.write_text(pre + new_block + post, encoding="utf-8")
-    print(f"[OK] Injected benchmark table into {readme_path}")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--csv",
-        default="benchmarks/results/benchmark_summary.csv",
-        type=Path,
+    pattern = re.compile(
+        re.escape(START) + r".*?" + re.escape(END), re.DOTALL
     )
-    parser.add_argument("--readme", default="README.md", type=Path)
-    parser.add_argument("--print-only", action="store_true")
-    args = parser.parse_args()
+    replacement = f"{START}\n{table}\n{END}"
+    new_text = pattern.sub(replacement, text)
+    readme_path.write_text(new_text, encoding="utf-8")
+    print(f"Updated {readme_path}")
 
-    if not args.csv.exists():
-        raise FileNotFoundError(
-            f"{args.csv} not found. "
-            f"Run `python benchmarks/run_benchmarks.py` first."
-        )
 
-    table_df = format_summary(args.csv)
-    table_md = df_to_markdown(table_df)
+# ----------------------------------------------------------------------
+# CLI
+# ----------------------------------------------------------------------
 
-    print("\n--- Generated Markdown Table ---")
-    print(table_md)
-    print("--------------------------------\n")
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--in", dest="inp", type=str,
+                   default="results/benchmark.json")
+    p.add_argument("--readme", type=str, default="README.md")
+    p.add_argument("--stdout", action="store_true",
+                   help="Print table to stdout only.")
+    p.add_argument("--update-readme", action="store_true",
+                   help="Rewrite README between markers.")
+    return p.parse_args()
 
-    if args.print_only:
-        return
-    inject_into_readme(args.readme, table_md)
+
+def main():
+    args = parse_args()
+
+    in_path = Path(args.inp)
+    if not in_path.exists():
+        print(f"[error] {in_path} not found. Run run_benchmarks.py first.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    payload = json.loads(in_path.read_text())
+    records = payload.get("records", [])
+    if not records:
+        print("[error] No records in JSON.", file=sys.stderr)
+        sys.exit(1)
+
+    agg = aggregate(records)
+    table = to_markdown(agg)
+
+    if args.stdout or not args.update_readme:
+        print(table)
+
+    if args.update_readme:
+        readme_path = Path(args.readme)
+        update_readme(readme_path, table)
 
 
 if __name__ == "__main__":
