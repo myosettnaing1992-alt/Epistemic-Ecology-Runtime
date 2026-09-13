@@ -440,7 +440,6 @@ Development setup
 ```bash
 git clone https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime.git
 cd Epistemic-Ecology-Runtime
-
 python -m venv .venv
 source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -e ".[dev,bench]"
@@ -458,9 +457,8 @@ Code style
 Acknowledgements
 
 The mathematical structure of EER was inspired by homological methods in
-theoretical physics (AKSZ-BV formalism, Deformed Quantum Variance). 
-
-The framework presented here is entirely self-contained; no categorical
+theoretical physics (AKSZ-BV formalism, Deformed Quantum Variance). The
+framework presented here is entirely self-contained; no categorical
 equivalence is claimed.
 
 ---
@@ -468,9 +466,8 @@ equivalence is claimed.
 Contact
 
 · Issues: https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/issues
-· Email: myosettnaing1992@gmail.com
+· Email: your.email@institution.edu
 · ORCID: 0009-0002-9133-0058
+· Paper: arXiv:XXXX.XXXXX (pending)
 
 ```
-
-
