@@ -69,19 +69,27 @@ class _BinaryLiftingLCA:
         return int(self.parent[0, u])
 
     def path(self, u: int, v: int) -> list[int]:
+        """
+        Return the tree path from u to v (inclusive of both endpoints).
+
+        Uses left + reversed(right) directly, since `right` already
+        excludes the LCA.
+        """
         w = self.lca(u, v)
-        left = []
+        left: list[int] = []
         x = u
         while x != w:
             left.append(x)
             x = int(self.parent[0, x])
         left.append(w)
-        right = []
+
+        right: list[int] = []
         x = v
         while x != w:
             right.append(x)
             x = int(self.parent[0, x])
-        return left + right[::-1][1:]
+
+        return left + right[::-1]
 
 
 # ----------------------------------------------------------------------
@@ -108,8 +116,8 @@ def build_fundamental_cycle_basis(
     """
     Build a fundamental cycle basis of the undirected support graph.
 
-    Uses Kruskal spanning forest + binary-lifting LCA.
-    Returns at most K_max shortest cycles.
+    Uses Kruskal spanning forest + binary-lifting LCA. Returns at most
+    K_max shortest cycles.
     """
     import networkx as nx
 
@@ -120,21 +128,36 @@ def build_fundamental_cycle_basis(
 
     # Kruskal minimum spanning forest
     T = nx.minimum_spanning_tree(G_nx)
-    tree_edges = set(frozenset(e) for e in T.edges())
-    non_tree_edges = [e for e in G_nx.edges() if frozenset(e) not in tree_edges]
 
-    # Build adjacency for LCA
+    # Collect tree edges as ordered tuples of Python ints (both directions)
+    tree_edges: set[tuple[int, int]] = set()
+    for u, v in T.edges():
+        iu, iv = int(u), int(v)
+        tree_edges.add((iu, iv))
+        tree_edges.add((iv, iu))
+
+    # Identify non-tree edges
+    non_tree_edges: list[tuple[int, int]] = []
+    for u, v in G_nx.edges():
+        iu, iv = int(u), int(v)
+        if (iu, iv) not in tree_edges:
+            non_tree_edges.append((iu, iv))
+
+    # Build adjacency for LCA from the spanning tree
     parent_edges: dict[int, list[int]] = {i: [] for i in range(n)}
     for u, v in T.edges():
-        parent_edges[u].append(v)
-        parent_edges[v].append(u)
+        iu, iv = int(u), int(v)
+        parent_edges[iu].append(iv)
+        parent_edges[iv].append(iu)
 
     lca = _BinaryLiftingLCA(n, parent_edges)
 
     # For each non-tree edge, form the unique fundamental cycle
     cycles: list[list[int]] = []
     for u, v in non_tree_edges:
-        cycles.append(lca.path(u, v))
+        path_uv = lca.path(u, v)
+        if len(path_uv) >= 3:      # fundamental cycles always have >= 3 nodes
+            cycles.append(path_uv)
 
     n_cycles_total = len(cycles)
     cycles.sort(key=len)
@@ -144,15 +167,23 @@ def build_fundamental_cycle_basis(
     cycle_lengths = np.array([len(c) for c in cycles], dtype=np.int64)
 
     # Signed incidence matrix B_sigma: b_sigma(v_k) = (-1)^k
-    rows, cols, data = [], [], []
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
     for j, cycle in enumerate(cycles):
         for k, v in enumerate(cycle):
             rows.append(v)
             cols.append(j)
             data.append(1.0 if k % 2 == 0 else -1.0)
-    B = csr_matrix(
-        (data, (rows, cols)), shape=(n, n_cycles_kept), dtype=np.float64
-    )
+
+    if data:
+        B = csr_matrix(
+            (data, (rows, cols)),
+            shape=(n, n_cycles_kept),
+            dtype=np.float64,
+        )
+    else:
+        B = csr_matrix((n, 0), dtype=np.float64)
 
     return CycleBasisResult(
         cycles=cycles,
@@ -164,7 +195,7 @@ def build_fundamental_cycle_basis(
 
 
 # ----------------------------------------------------------------------
-# Cycle precision matrix (eq. 5.6 / 17)
+# Cycle precision matrix
 # ----------------------------------------------------------------------
 
 def build_cycle_matrix_fundamental(
@@ -175,15 +206,18 @@ def build_cycle_matrix_fundamental(
     Build Q_cycle = sum_sigma |sigma|^{-1} B_sigma B_sigma^T.
     """
     basis = build_fundamental_cycle_basis(G, K_max=K_max)
+    n = G.num_nodes
     B = basis.incidence
     L = basis.cycle_lengths.astype(np.float64)
-    if L.size == 0:
-        return csr_matrix((G.num_nodes, G.num_nodes), dtype=np.float64)
+
+    if L.size == 0 or B.shape[1] == 0:
+        return csr_matrix((n, n), dtype=np.float64)
 
     inv_L = 1.0 / L
     Bw = B.multiply(inv_L[np.newaxis, :])
     Q = (Bw @ B.T).tocsr()
     Q = 0.5 * (Q + Q.T)
+    Q.eliminate_zeros()
     return Q.tocsr()
 
 
@@ -203,6 +237,3 @@ if __name__ == "__main__":
     print(f"Total fundamental cycles: {basis.n_cycles_total}")
     print(f"Cycles kept: {basis.n_cycles_kept}")
     print(f"Mean length: {basis.cycle_lengths.mean():.2f}")
-
-    Q = build_cycle_matrix_fundamental(g, K_max=500)
-    print(f"Q_cycle shape: {Q.shape}, nnz = {Q.nnz}")
