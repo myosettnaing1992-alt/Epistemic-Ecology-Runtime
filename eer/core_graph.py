@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, diags
 
 
 # ----------------------------------------------------------------------
@@ -39,13 +39,11 @@ class EpistemicGraph:
 
     num_nodes: int
 
-    # Typed edge buffers (flat lists; converted to arrays on demand)
     _src: list[int] = field(default_factory=list)
     _dst: list[int] = field(default_factory=list)
     _weight: list[float] = field(default_factory=list)
     _etype: list[int] = field(default_factory=list)
 
-    # Node attributes
     b: np.ndarray | None = None
     lambda_vec: np.ndarray | None = None
     x_min: np.ndarray | None = None
@@ -107,7 +105,6 @@ class EpistemicGraph:
 
     @property
     def edges(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Return (src, dst, weight, etype) as numpy arrays."""
         return (
             np.asarray(self._src, dtype=np.int64),
             np.asarray(self._dst, dtype=np.int64),
@@ -115,64 +112,60 @@ class EpistemicGraph:
             np.asarray(self._etype, dtype=np.int64),
         )
 
-    def edges_by_type(self, etype: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return (src, dst, weight) for a single edge type."""
+    def edges_by_type(
+        self, etype: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         src, dst, w, t = self.edges
         mask = t == etype
         return src[mask], dst[mask], w[mask]
 
     # ------------------------------------------------------------------
-    # Sparse matrix builders
+    # Sparse adjacency
     # ------------------------------------------------------------------
 
-    def support_adjacency(self) -> csr_matrix:
-        src, dst, w = self.edges_by_type(EDGE_SUPPORT)
+    def _adjacency_for(self, etype: int) -> csr_matrix:
+        src, dst, w = self.edges_by_type(etype)
         n = self.num_nodes
+        if src.size == 0:
+            return csr_matrix((n, n), dtype=np.float64)
         return coo_matrix((w, (src, dst)), shape=(n, n)).tocsr()
+
+    def support_adjacency(self) -> csr_matrix:
+        return self._adjacency_for(EDGE_SUPPORT)
 
     def contradiction_adjacency(self) -> csr_matrix:
-        src, dst, w = self.edges_by_type(EDGE_CONTRADICTION)
-        n = self.num_nodes
-        return coo_matrix((w, (src, dst)), shape=(n, n)).tocsr()
+        return self._adjacency_for(EDGE_CONTRADICTION)
 
     def derived_from_adjacency(self) -> csr_matrix:
-        src, dst, w = self.edges_by_type(EDGE_DERIVED_FROM)
+        return self._adjacency_for(EDGE_DERIVED_FROM)
+
+    # ------------------------------------------------------------------
+    # Symmetric Laplacians
+    # ------------------------------------------------------------------
+    # FIX: previous implementation mis-constructed off-diagonal entries.
+    # We now compute L = D - A_sym explicitly using scipy.sparse.diags,
+    # which is guaranteed to be positive semi-definite.
+    # ------------------------------------------------------------------
+
+    def _symmetric_laplacian(self, A: csr_matrix) -> csr_matrix:
         n = self.num_nodes
-        return coo_matrix((w, (src, dst)), shape=(n, n)).tocsr()
+        if A.nnz == 0:
+            return csr_matrix((n, n), dtype=np.float64)
+        A_sym = (0.5 * (A + A.T)).tocsr()
+        A_sym.eliminate_zeros()
+        deg = np.asarray(A_sym.sum(axis=1)).ravel()
+        D = diags(deg, 0, format="csr")
+        L = (D - A_sym).tocsr()
+        L.eliminate_zeros()
+        return L
 
     def support_laplacian(self) -> csr_matrix:
-        """Symmetric Laplacian L_S = B_S W_S B_S^T (undirected)."""
-        A = self.support_adjacency()
-        A_sym = 0.5 * (A + A.T)
-        deg = np.asarray(A_sym.sum(axis=1)).ravel()
-        L = csr_matrix(
-            (
-                np.concatenate([deg, -A_sym.data]),
-                (
-                    np.concatenate([np.arange(self.num_nodes), A_sym.indices]),
-                    np.concatenate([np.arange(self.num_nodes), A_sym.indices]),
-                ),
-            ),
-            shape=(self.num_nodes, self.num_nodes),
-        )
-        return L.tocsr()
+        """Symmetric support Laplacian L_S = D - A_sym."""
+        return self._symmetric_laplacian(self.support_adjacency())
 
     def derived_from_laplacian(self) -> csr_matrix:
-        """Symmetric Laplacian L_D = B_D W_D B_D^T."""
-        A = self.derived_from_adjacency()
-        A_sym = 0.5 * (A + A.T)
-        deg = np.asarray(A_sym.sum(axis=1)).ravel()
-        L = csr_matrix(
-            (
-                np.concatenate([deg, -A_sym.data]),
-                (
-                    np.concatenate([np.arange(self.num_nodes), A_sym.indices]),
-                    np.concatenate([np.arange(self.num_nodes), A_sym.indices]),
-                ),
-            ),
-            shape=(self.num_nodes, self.num_nodes),
-        )
-        return L.tocsr()
+        """Symmetric derived-from Laplacian L_D = D - A_sym."""
+        return self._symmetric_laplacian(self.derived_from_adjacency())
 
 
 # ----------------------------------------------------------------------
@@ -188,5 +181,4 @@ if __name__ == "__main__":
 
     print(f"Nodes: {g.num_nodes}")
     print(f"Edges: {g.num_edges}")
-    print(f"Support adjacency:\n{g.support_adjacency().toarray()}")
     print(f"Support Laplacian:\n{g.support_laplacian().toarray()}")
