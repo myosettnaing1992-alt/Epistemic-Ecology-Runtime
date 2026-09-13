@@ -1,111 +1,192 @@
-"""Graph representation with decoupled edge-list buffering."""
+"""
+Core epistemic graph structure.
 
-from typing import Tuple
+Decoupled edge-list buffering: edges are stored in flat typed arrays,
+supporting fast appends and vectorized conversion to scipy sparse matrices.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
 import numpy as np
-import scipy.sparse as sp
-from scipy.sparse.csgraph import connected_components
+from scipy.sparse import coo_matrix, csr_matrix
 
 
+# ----------------------------------------------------------------------
+# Edge type constants
+# ----------------------------------------------------------------------
+
+EDGE_SUPPORT = 0
+EDGE_CONTRADICTION = 1
+EDGE_DERIVED_FROM = 2
+
+
+# ----------------------------------------------------------------------
+# EpistemicGraph
+# ----------------------------------------------------------------------
+
+@dataclass
 class EpistemicGraph:
-    """Memory-efficient epistemic graph G = (V, E_S, E_C, E_D)."""
+    """
+    Directed epistemic multigraph with three disjoint edge types.
 
-    def __init__(self, num_nodes: int):
-        if num_nodes <= 0:
-            raise ValueError(f"num_nodes must be positive, got {num_nodes}")
-        self.n = num_nodes
-        self.b = np.full(num_nodes, 0.5, dtype=np.float64)
-        self.lambda_vec = np.ones(num_nodes, dtype=np.float64)
+    Parameters
+    ----------
+    num_nodes : int
+        Number of belief-holding agents.
+    """
 
-        self._S_rows, self._S_cols, self._S_vals = [], [], []
-        self._C_rows, self._C_cols, self._C_vals = [], [], []
-        self._D_rows, self._D_cols, self._D_vals = [], [], []
+    num_nodes: int
 
-        self._cache: dict = {}
+    # Typed edge buffers (flat lists; converted to arrays on demand)
+    _src: list[int] = field(default_factory=list)
+    _dst: list[int] = field(default_factory=list)
+    _weight: list[float] = field(default_factory=list)
+    _etype: list[int] = field(default_factory=list)
 
-    # -- validation ----------------------------------------------------------
-    def _check(self, u: int, v: int, w: float) -> None:
-        if not (0 <= u < self.n):
-            raise IndexError(f"node index u={u} out of range [0, {self.n})")
-        if not (0 <= v < self.n):
-            raise IndexError(f"node index v={v} out of range [0, {self.n})")
-        if w < 0:
-            raise ValueError(f"edge weight must be non-negative, got {w}")
+    # Node attributes
+    b: np.ndarray | None = None
+    lambda_vec: np.ndarray | None = None
+    x_min: np.ndarray | None = None
+    x_max: np.ndarray | None = None
 
-    def _invalidate_cache(self) -> None:
-        self._cache.clear()
+    def __post_init__(self) -> None:
+        n = self.num_nodes
+        if self.b is None:
+            self.b = np.zeros(n, dtype=np.float64)
+        if self.lambda_vec is None:
+            self.lambda_vec = np.ones(n, dtype=np.float64)
+        if self.x_min is None:
+            self.x_min = np.zeros(n, dtype=np.float64)
+        if self.x_max is None:
+            self.x_max = np.ones(n, dtype=np.float64)
 
-    # -- edge adders ---------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Edge addition
+    # ------------------------------------------------------------------
+
     def add_support_edge(self, u: int, v: int, w: float = 1.0) -> None:
-        self._check(u, v, w)
-        self._invalidate_cache()
-        self._S_rows.extend([u, v])
-        self._S_cols.extend([v, u])
-        self._S_vals.extend([w, w])
+        self._check_edge(u, v, w)
+        self._src.append(u)
+        self._dst.append(v)
+        self._weight.append(w)
+        self._etype.append(EDGE_SUPPORT)
 
     def add_contradiction_edge(self, u: int, v: int, w: float = 1.0) -> None:
-        self._check(u, v, w)
-        self._invalidate_cache()
-        self._C_rows.extend([u, v])
-        self._C_cols.extend([v, u])
-        self._C_vals.extend([w, w])
+        self._check_edge(u, v, w)
+        self._src.append(u)
+        self._dst.append(v)
+        self._weight.append(w)
+        self._etype.append(EDGE_CONTRADICTION)
 
-    def add_derivation_edge(self, u: int, v: int, w: float = 1.0) -> None:
-        self._check(u, v, w)
-        self._invalidate_cache()
-        self._D_rows.append(u)
-        self._D_cols.append(v)
-        self._D_vals.append(w)
+    def add_derived_from_edge(self, u: int, v: int, w: float = 1.0) -> None:
+        self._check_edge(u, v, w)
+        self._src.append(u)
+        self._dst.append(v)
+        self._weight.append(w)
+        self._etype.append(EDGE_DERIVED_FROM)
 
-    # -- sparse builders -----------------------------------------------------
-    def _build_csr(self, rows, cols, vals) -> sp.csr_matrix:
-        if not rows:
-            return sp.csr_matrix((self.n, self.n), dtype=np.float64)
-        return sp.coo_matrix(
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _check_edge(self, u: int, v: int, w: float) -> None:
+        if not (0 <= u < self.num_nodes) or not (0 <= v < self.num_nodes):
+            raise IndexError(f"Node index out of range: ({u}, {v})")
+        if w < 0:
+            raise ValueError(f"Edge weight must be non-negative: {w}")
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def num_edges(self) -> int:
+        return len(self._src)
+
+    @property
+    def edges(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return (src, dst, weight, etype) as numpy arrays."""
+        return (
+            np.asarray(self._src, dtype=np.int64),
+            np.asarray(self._dst, dtype=np.int64),
+            np.asarray(self._weight, dtype=np.float64),
+            np.asarray(self._etype, dtype=np.int64),
+        )
+
+    def edges_by_type(self, etype: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return (src, dst, weight) for a single edge type."""
+        src, dst, w, t = self.edges
+        mask = t == etype
+        return src[mask], dst[mask], w[mask]
+
+    # ------------------------------------------------------------------
+    # Sparse matrix builders
+    # ------------------------------------------------------------------
+
+    def support_adjacency(self) -> csr_matrix:
+        src, dst, w = self.edges_by_type(EDGE_SUPPORT)
+        n = self.num_nodes
+        return coo_matrix((w, (src, dst)), shape=(n, n)).tocsr()
+
+    def contradiction_adjacency(self) -> csr_matrix:
+        src, dst, w = self.edges_by_type(EDGE_CONTRADICTION)
+        n = self.num_nodes
+        return coo_matrix((w, (src, dst)), shape=(n, n)).tocsr()
+
+    def derived_from_adjacency(self) -> csr_matrix:
+        src, dst, w = self.edges_by_type(EDGE_DERIVED_FROM)
+        n = self.num_nodes
+        return coo_matrix((w, (src, dst)), shape=(n, n)).tocsr()
+
+    def support_laplacian(self) -> csr_matrix:
+        """Symmetric Laplacian L_S = B_S W_S B_S^T (undirected)."""
+        A = self.support_adjacency()
+        A_sym = 0.5 * (A + A.T)
+        deg = np.asarray(A_sym.sum(axis=1)).ravel()
+        L = csr_matrix(
             (
-                np.asarray(vals, dtype=np.float64),
+                np.concatenate([deg, -A_sym.data]),
                 (
-                    np.asarray(rows, dtype=np.int32),
-                    np.asarray(cols, dtype=np.int32),
+                    np.concatenate([np.arange(self.num_nodes), A_sym.indices]),
+                    np.concatenate([np.arange(self.num_nodes), A_sym.indices]),
                 ),
             ),
-            shape=(self.n, self.n),
-        ).tocsr()
-
-    def get_W_S(self) -> sp.csr_matrix:
-        if "W_S" not in self._cache:
-            self._cache["W_S"] = self._build_csr(self._S_rows, self._S_cols, self._S_vals)
-        return self._cache["W_S"]
-
-    def get_W_C(self) -> sp.csr_matrix:
-        if "W_C" not in self._cache:
-            self._cache["W_C"] = self._build_csr(self._C_rows, self._C_cols, self._C_vals)
-        return self._cache["W_C"]
-
-    def get_W_D(self) -> sp.csr_matrix:
-        if "W_D" not in self._cache:
-            self._cache["W_D"] = self._build_csr(self._D_rows, self._D_cols, self._D_vals)
-        return self._cache["W_D"]
-
-    # -- SCC decomposition ---------------------------------------------------
-    def get_scc_decomposition(self) -> Tuple[int, np.ndarray]:
-        W_D = self.get_W_D()
-        num_sccs, labels = connected_components(
-            W_D, directed=True, connection="strong"
+            shape=(self.num_nodes, self.num_nodes),
         )
-        return num_sccs, labels.astype(np.int32)
+        return L.tocsr()
 
-    # -- diagnostics ---------------------------------------------------------
-    def num_edges(self) -> dict:
-        return {
-            "support": len(self._S_rows) // 2,
-            "contradiction": len(self._C_rows) // 2,
-            "derivation": len(self._D_rows),
-        }
+    def derived_from_laplacian(self) -> csr_matrix:
+        """Symmetric Laplacian L_D = B_D W_D B_D^T."""
+        A = self.derived_from_adjacency()
+        A_sym = 0.5 * (A + A.T)
+        deg = np.asarray(A_sym.sum(axis=1)).ravel()
+        L = csr_matrix(
+            (
+                np.concatenate([deg, -A_sym.data]),
+                (
+                    np.concatenate([np.arange(self.num_nodes), A_sym.indices]),
+                    np.concatenate([np.arange(self.num_nodes), A_sym.indices]),
+                ),
+            ),
+            shape=(self.num_nodes, self.num_nodes),
+        )
+        return L.tocsr()
 
-    def __repr__(self) -> str:
-        e = self.num_edges()
-        return (
-            f"EpistemicGraph(n={self.n}, "
-            f"|E_S|={e['support']}, |E_C|={e['contradiction']}, "
-            f"|E_D|={e['derivation']})"
-          )
+
+# ----------------------------------------------------------------------
+# Smoke test
+# ----------------------------------------------------------------------
+
+if __name__ == "__main__":
+    g = EpistemicGraph(num_nodes=5)
+    g.add_support_edge(0, 1, 1.0)
+    g.add_support_edge(1, 2, 0.5)
+    g.add_derived_from_edge(2, 3, 0.8)
+    g.add_contradiction_edge(3, 4, 0.3)
+
+    print(f"Nodes: {g.num_nodes}")
+    print(f"Edges: {g.num_edges}")
+    print(f"Support adjacency:\n{g.support_adjacency().toarray()}")
+    print(f"Support Laplacian:\n{g.support_laplacian().toarray()}")
