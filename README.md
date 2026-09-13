@@ -398,7 +398,9 @@ Contributing
 We welcome contributions. Please read CONTRIBUTING.md first.
 
 · Bug reports — open a GitHub issue with a minimal reproduction.
+
 · Feature requests — open an issue describing the use case.
+
 · Pull requests — fork, branch, run pytest tests/ -v, and submit.
 
 Development setup
@@ -415,7 +417,9 @@ pre-commit install           # optional
 Code style
 
 · ruff for linting and formatting (line length 88)
+
 · mypy for type checking (strict on eer/)
+
 · NumPy-style docstrings
 
 ---
@@ -431,9 +435,8 @@ is claimed.
 
 Contact
 
-· Issues: https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/issues
-· Email: your.email@institution.edu
-· ORCID: 0009-0002-9133-0058
-· Paper: arXiv:XXXX.XXXXX (pending)
+· Issues: 
+https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/issues
 
+· ORCID: 0009-0002-9133-0058
 ```
