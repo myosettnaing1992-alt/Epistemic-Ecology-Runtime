@@ -466,8 +466,7 @@ equivalence is claimed.
 Contact
 
 · Issues: https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/issues
-· Email: your.email@institution.edu
+· Email: myosettnaing1992@gmail.com
 · ORCID: 0009-0002-9133-0058
-· Paper: arXiv:XXXX.XXXXX (pending)
 
 ```
