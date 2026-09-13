@@ -473,13 +473,4 @@ Contact
 
 ```
 
---
 
-```bash
-cd Epistemic-Ecology-Runtime/
-git add README.md
-git commit -m "docs: add comprehensive README"
-git push origin main
-```
-
-သင် နောက်တစ်ဆင့် မည်သည့်အရာကို လိုချင်ပါသနည်း?
