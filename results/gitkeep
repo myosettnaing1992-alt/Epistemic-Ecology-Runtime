@@ -1,0 +1,3 @@
+cd Epistemic-Ecology-Runtime/
+mkdir -p results
+touch results/.gitkeep
