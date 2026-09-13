@@ -20,18 +20,16 @@ from .core_graph import EpistemicGraph
 # ----------------------------------------------------------------------
 
 class _BinaryLiftingLCA:
-    def __init__(self, n: int, parent_edges: dict[int, list[int]]):
+    def __init__(self, n: int, adj: dict[int, list[int]]):
         self.n = n
         self.LOG = max(1, n.bit_length())
         self.depth = np.full(n, -1, dtype=np.int64)
         self.parent = np.full((self.LOG, n), -1, dtype=np.int64)
 
-        # BFS from each component root
         visited = np.zeros(n, dtype=bool)
         for root in range(n):
-            if visited[root] or root not in parent_edges:
-                continue
-            self._bfs(root, parent_edges, visited)
+            if not visited[root]:
+                self._bfs(root, adj, visited)
 
     def _bfs(self, root, adj, visited):
         self.depth[root] = 0
@@ -40,7 +38,8 @@ class _BinaryLiftingLCA:
         queue = [root]
         head = 0
         while head < len(queue):
-            u = queue[head]; head += 1
+            u = queue[head]
+            head += 1
             for v in adj.get(u, []):
                 if not visited[v]:
                     visited[v] = True
@@ -147,7 +146,6 @@ def build_fundamental_cycle_basis(
     # Signed incidence matrix B_sigma: b_sigma(v_k) = (-1)^k
     rows, cols, data = [], [], []
     for j, cycle in enumerate(cycles):
-        L = len(cycle)
         for k, v in enumerate(cycle):
             rows.append(v)
             cols.append(j)
@@ -199,7 +197,7 @@ if __name__ == "__main__":
     G_nx = nx.barabasi_albert_graph(200, 3, seed=0)
     g = EpistemicGraph(num_nodes=200)
     for u, v in G_nx.edges():
-        g.add_support_edge(u, v, 1.0)
+        g.add_support_edge(int(u), int(v), 1.0)
 
     basis = build_fundamental_cycle_basis(g, K_max=500)
     print(f"Total fundamental cycles: {basis.n_cycles_total}")
