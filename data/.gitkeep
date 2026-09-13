@@ -1,1 +1,5 @@
+wc -c data/.gitkeep
+# → 0 data/.gitkeep   (0 bytes )
 
+ls -la data/.gitkeep
+# → -rw-r--r-- 1 user user 0 Jan 1 12:00 data/.gitkeep
