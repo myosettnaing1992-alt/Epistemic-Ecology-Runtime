@@ -1,0 +1,146 @@
+---
+
+
+{
+  "metadata": {
+    "python": "3.11.9 (main, Apr 19 2024, 16:48:06) [GCC 11.4.0]",
+    "platform": "Linux-6.5.0-35-generic-x86_64-with-glibc2.35",
+    "processor": "x86_64",
+    "timestamp": 1740000000.0,
+    "note": "SCHEMATIC SAMPLE — actual numbers depend on hardware and seed. Run run_benchmarks.py to reproduce."
+  },
+  "records": [
+    {
+      "graph": "mve",
+      "n": 32,
+      "m_S": 31,
+      "method": "cyclic_gs",
+      "wallclock_sec": 0.012,
+      "coordinate_updates": 384,
+      "final_residual": 8.21e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "mve",
+      "n": 32,
+      "m_S": 31,
+      "method": "random_priority",
+      "wallclock_sec": 0.008,
+      "coordinate_updates": 478,
+      "final_residual": 9.15e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "mve",
+      "n": 32,
+      "m_S": 31,
+      "method": "hybrid_priority",
+      "wallclock_sec": 0.009,
+      "coordinate_updates": 352,
+      "final_residual": 8.94e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "ba",
+      "n": 500,
+      "m_S": 1491,
+      "method": "cyclic_gs",
+      "wallclock_sec": 0.245,
+      "coordinate_updates": 15500,
+      "final_residual": 9.87e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "ba",
+      "n": 500,
+      "m_S": 1491,
+      "method": "random_priority",
+      "wallclock_sec": 0.198,
+      "coordinate_updates": 14200,
+      "final_residual": 9.61e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "ba",
+      "n": 500,
+      "m_S": 1491,
+      "method": "hybrid_priority",
+      "wallclock_sec": 0.062,
+      "coordinate_updates": 1403,
+      "final_residual": 9.42e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "ba",
+      "n": 10000,
+      "m_S": 29997,
+      "method": "cyclic_gs",
+      "wallclock_sec": 12.34,
+      "coordinate_updates": 8420,
+      "final_residual": 9.91e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "ba",
+      "n": 10000,
+      "m_S": 29997,
+      "method": "random_priority",
+      "wallclock_sec": 13.21,
+      "coordinate_updates": 9100,
+      "final_residual": 9.88e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "ba",
+      "n": 10000,
+      "m_S": 29997,
+      "method": "hybrid_priority",
+      "wallclock_sec": 7.89,
+      "coordinate_updates": 5230,
+      "final_residual": 9.73e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "er",
+      "n": 10000,
+      "m_S": 25001,
+      "method": "cyclic_gs",
+      "wallclock_sec": 11.87,
+      "coordinate_updates": 7890,
+      "final_residual": 9.85e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "er",
+      "n": 10000,
+      "m_S": 25001,
+      "method": "random_priority",
+      "wallclock_sec": 12.45,
+      "coordinate_updates": 8200,
+      "final_residual": 9.92e-07,
+      "converged": true,
+      "seed": 0
+    },
+    {
+      "graph": "er",
+      "n": 10000,
+      "m_S": 25001,
+      "method": "hybrid_priority",
+      "wallclock_sec": 11.92,
+      "coordinate_updates": 7950,
+      "final_residual": 9.89e-07,
+      "converged": true,
+      "seed": 0
+    }
+  ]
+}
