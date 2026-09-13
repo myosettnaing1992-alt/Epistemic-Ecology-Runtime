@@ -470,7 +470,6 @@ Contact
 · Issues: https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/issues
 · Email: myosettnaing1992@gmail.com
 · ORCID: 0009-0002-9133-0058
-· Paper: 
 
 ```
 
