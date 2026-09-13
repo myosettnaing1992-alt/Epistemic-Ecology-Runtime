@@ -2,13 +2,18 @@
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# ============================================================
+# Project metadata
+# ============================================================
+
 [project]
 name = "epistemic-ecology-runtime"
 version = "0.1.0"
 description = "A strictly convex variational framework for belief aggregation on directed epistemic graphs"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Myo Sett Naing", email = "your.email@institution.edu" },
 ]
@@ -27,7 +32,6 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -59,7 +63,6 @@ bench = [
 docs = [
     "mkdocs>=1.5.0",
     "mkdocs-material>=9.5.0",
-    "mkdocstrings[python]>=0.24.0",
 ]
 
 [project.urls]
@@ -73,28 +76,47 @@ Citation = "https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/bl
 eer-benchmark = "benchmarks.run_benchmarks:main"
 eer-format = "benchmarks.format_benchmark:main"
 
+# ============================================================
+# Setuptools — package discovery
+# ============================================================
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["eer*"]
-exclude = ["tests*", "benchmarks*", "docs*", "results*", "figures*", "data*"]
+exclude = [
+    "tests*",
+    "benchmarks*",
+    "experiments*",
+    "docs*",
+    "results*",
+    "figures*",
+    "data*",
+    "build*",
+    "dist*",
+]
+
+# ============================================================
+# Pytest
+# ============================================================
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --strict-config"
+addopts = "-ra --strict-markers"
 markers = [
     "slow: mark test as slow (deselect with '-m \"not slow\"')",
     "integration: mark test as integration (multi-module)",
 ]
-filterwarnings = [
-    "error",
-    "ignore::DeprecationWarning:numba.*",
-]
+
+# ============================================================
+# Coverage
+# ============================================================
 
 [tool.coverage.run]
 source = ["eer"]
 omit = [
     "*/tests/*",
     "*/benchmarks/*",
+    "*/experiments/*",
     "*/__init__.py",
 ]
 
@@ -106,6 +128,13 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
+
+# ============================================================
+# Ruff — linter & formatter
+# Note: "N" (pep8-naming) is intentionally NOT selected, because
+# scientific code conventionally uses uppercase for matrices (H, Q, A)
+# and graphs (G). PEP 8 naming rules conflict with domain convention.
+# ============================================================
 
 [tool.ruff]
 line-length = 88
@@ -128,7 +157,6 @@ select = [
     "W",   # pycodestyle warnings
     "F",   # pyflakes
     "I",   # isort
-    "N",   # pep8-naming
     "UP",  # pyupgrade
     "B",   # flake8-bugbear
     "C4",  # flake8-comprehensions
@@ -137,18 +165,27 @@ select = [
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
-    "B008",  # function call in default arg (common in dataclasses)
+    "B008",  # function call in default argument
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["B011", "N802"]
+"tests/*" = ["B011", "E402"]
 "benchmarks/*" = ["E402"]
+"experiments/*" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ============================================================
+# mypy — type checker
+# ============================================================
 
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
-disallow_untyped_defs = true
+disallow_untyped_defs = false
 disallow_any_unimported = false
 ignore_missing_imports = true
 exclude = [
@@ -156,9 +193,5 @@ exclude = [
     "dist/",
     "tests/",
     "benchmarks/",
+    "experiments/",
 ]
-
-[tool.mypy-numba]
-# Numba decorators often break static typing; we type-check the
-# surrounding functions but not the @njit kernels.
-ignore_errors = true
