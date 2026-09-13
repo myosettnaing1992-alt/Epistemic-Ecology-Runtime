@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epistemic-ecology-runtime"
+version = "0.1.0"
+description = "Variational framework for continuous belief relaxation on dynamic epistemic graphs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "EER Contributors"},
+]
+keywords = ["belief aggregation", "variational inference", "gauss-seidel", "epistemic graphs"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "numpy>=1.24.0,<2.0",
+    "scipy>=1.10.0,<2.0",
+    "networkx>=3.0,<4.0",
+    "numba>=0.57.0,<0.60",
+    "joblib>=1.2.0,<2.0",
+    "pyyaml>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0,<9.0",
+    "pytest-cov>=4.1.0,<6.0",
+    "matplotlib>=3.7.0,<4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/<your-org>/epistemic-ecology-runtime"
+Repository = "https://github.com/<your-org>/epistemic-ecology-runtime"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core_graph*", "hessian_builder*", "schedulers*", "cycle_basis*", "calibration*"]
