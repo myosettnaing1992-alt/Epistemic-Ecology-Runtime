@@ -1,4 +1,3 @@
-```markdown
 # Epistemic Ecology Runtime (EER)
 
 [![Tests](https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/actions/workflows/test.yml/badge.svg)](https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/actions/workflows/test.yml)
