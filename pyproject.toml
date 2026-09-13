@@ -5,21 +5,36 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "epistemic-ecology-runtime"
 version = "0.1.0"
-description = "Variational framework for continuous belief relaxation on dynamic epistemic graphs"
+description = "A strictly convex variational framework for belief aggregation on directed epistemic graphs"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = { text = "MIT" }
 authors = [
-    {name = "EER Contributors"},
+    { name = "Myo Sett Naing", email = "your.email@institution.edu" },
 ]
-keywords = ["belief aggregation", "variational inference", "gauss-seidel", "epistemic graphs"]
+maintainers = [
+    { name = "Myo Sett Naing", email = "your.email@institution.edu" },
+]
+keywords = [
+    "belief aggregation",
+    "variational inference",
+    "gauss-seidel",
+    "epistemic graphs",
+    "convex optimization",
+    "numba",
+    "scientific computing",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
 dependencies = [
@@ -35,17 +50,115 @@ dependencies = [
 dev = [
     "pytest>=7.4.0,<9.0",
     "pytest-cov>=4.1.0,<6.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+]
+bench = [
     "matplotlib>=3.7.0,<4.0",
+]
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/<your-org>/epistemic-ecology-runtime"
-Repository = "https://github.com/<your-org>/epistemic-ecology-runtime"
+Homepage = "https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime"
+Repository = "https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime"
+Issues = "https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/issues"
+Changelog = "https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/blob/main/CHANGELOG.md"
+Citation = "https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime/blob/main/CITATION.cff"
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+[project.scripts]
+eer-benchmark = "benchmarks.run_benchmarks:main"
+eer-format = "benchmarks.format_benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core_graph*", "hessian_builder*", "schedulers*", "cycle_basis*", "calibration*"]
+include = ["eer*"]
+exclude = ["tests*", "benchmarks*", "docs*", "results*", "figures*", "data*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "slow: mark test as slow (deselect with '-m \"not slow\"')",
+    "integration: mark test as integration (multi-module)",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:numba.*",
+]
+
+[tool.coverage.run]
+source = ["eer"]
+omit = [
+    "*/tests/*",
+    "*/benchmarks/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "__pycache__",
+    "results",
+    "figures",
+    "data",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # function call in default arg (common in dataclasses)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "N802"]
+"benchmarks/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_unimported = false
+ignore_missing_imports = true
+exclude = [
+    "build/",
+    "dist/",
+    "tests/",
+    "benchmarks/",
+]
+
+[tool.mypy-numba]
+# Numba decorators often break static typing; we type-check the
+# surrounding functions but not the @njit kernels.
+ignore_errors = true
