@@ -1,29 +1,55 @@
-FROM python:3.11-slim
+# syntax=docker/dockerfile:1.6
 
-LABEL maintainer="Myo Sett Naing <you@example.com>"
-LABEL description="Epistemic Ecology Runtime (EER) reproducible environment"
+# ---------------------------------------------------------------
+# Stage 1: build
+# ---------------------------------------------------------------
+FROM python:3.11-slim AS builder
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    NUMBA_CACHE_DIR=/tmp/numba_cache
+WORKDIR /build
 
-WORKDIR /workspace
-
+# System deps for NumPy/SciPy/Numba
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
-        git \
-    && rm -rf /var/lib/apt/lists/
-  
-RUN pip install --upgrade pip setuptools wheel
+        gcc \
+        g++ \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md LICENSE CITATION.cff ./
+# Copy packaging metadata first (better layer caching)
+COPY pyproject.toml README.md ./
+COPY eer/ ./eer/
+COPY requirements.txt ./
+
+# Install into a virtualenv we can copy to the runtime stage
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN pip install --upgrade pip wheel setuptools \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -e .
+
+# ---------------------------------------------------------------
+# Stage 2: runtime
+# ---------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+LABEL org.opencontainers.image.title="Epistemic Ecology Runtime"
+LABEL org.opencontainers.image.description="Variational belief relaxation on epistemic graphs"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.source="https://github.com/myosettnaing1992-alt/Epistemic-Ecology-Runtime"
+
+WORKDIR /app
+
+# Copy the pre-built venv
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Copy source + tests + benchmarks
 COPY eer/ ./eer/
 COPY tests/ ./tests/
 COPY benchmarks/ ./benchmarks/
+COPY pyproject.toml README.md ./
 
-RUN pip install -e ".[dev,bench]"
-
-RUN python -c "import eer; print('EER', eer.__version__)"
-
+# Default command: run the test suite
 CMD ["pytest", "-v", "tests/"]
