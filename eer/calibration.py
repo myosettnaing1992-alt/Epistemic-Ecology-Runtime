@@ -9,6 +9,7 @@ Distinguishes:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import List, Tuple, Union
 
 import numpy as np
 from joblib import Parallel, delayed
@@ -83,7 +84,7 @@ class FastGridSearchCalibrator:
 
     def _eval_one(
         self, alpha: float, gamma: float, snapshots: np.ndarray
-    ) -> tuple[float, float, float]:
+    ) -> Tuple[float, float, float]:
         x_star = self._solve_at(alpha, gamma)
         if not np.all(np.isfinite(x_star)):
             return alpha, gamma, np.inf
@@ -97,10 +98,10 @@ class FastGridSearchCalibrator:
 
     def calibrate(
         self,
-        snapshots: list[np.ndarray] | np.ndarray,
+        snapshots: Union[List[np.ndarray], np.ndarray],
         n_jobs: int = -1,
         verbose: bool = False,
-    ) -> tuple[float, float, float]:
+    ) -> Tuple[float, float, float]:
         """
         Run the grid search.
 
@@ -137,7 +138,7 @@ class FastGridSearchCalibrator:
 
     def calibrate_full(
         self,
-        snapshots: list[np.ndarray] | np.ndarray,
+        snapshots: Union[List[np.ndarray], np.ndarray],
         n_jobs: int = -1,
     ) -> CalibrationResult:
         a, g, m = self.calibrate(snapshots, n_jobs=n_jobs)
