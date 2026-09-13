@@ -29,8 +29,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,bench]"
 
-      - name: Run tests
-        run: pytest -v tests/ --cov=eer --cov-report=term-missing
+      - name: Lint with ruff
+        run: ruff check eer/ benchmarks/
+
+      - name: Type check with mypy
+        run: mypy eer/
+        continue-on-error: true
+
+      - name: Run tests with coverage
+        run: pytest -v tests/ --cov=eer --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
 
       - name: Smoke benchmark
-        run: python benchmarks/run_benchmarks.py --smoke
+        run: python benchmarks/run_benchmarks.py --smoke --quiet
