@@ -1,6 +1,0 @@
-# EER — Figures
-figures/*.pdf
-figures/*.png
-figures/*.svg
-figures/*.eps
-!figures/.gitkeep
