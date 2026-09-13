@@ -113,6 +113,13 @@ data/*.npz
 !data/.gitkeep
 !data/README.md
 
+# EER — Figures
+figures/*.pdf
+figures/*.png
+figures/*.svg
+figures/*.eps
+!figures/.gitkeep
+
 # LaTeX
 *.aux
 *.bbl
