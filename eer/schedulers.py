@@ -1,144 +1,297 @@
-"""Numba JIT coordinate descent solvers with incremental O(deg) updates."""
+"""
+Coordinate-descent schedulers for EER.
 
-from typing import Tuple
+- run_cyclic_gs_scheduler               : projected cyclic Gauss-Seidel
+- run_random_priority_scheduler         : random priority (baseline)
+- run_hybrid_priority_scheduler_optimized : hybrid priority (Algorithm 4)
+"""
+
+from __future__ import annotations
+
+import heapq
+
 import numpy as np
-import numba as nb
+from numba import njit
 
 
-@nb.njit(fastmath=True)
-def numba_coordinate_step(
-    x: np.ndarray,
-    b: np.ndarray,
-    csr_indptr: np.ndarray,
-    csr_indices: np.ndarray,
-    csr_data: np.ndarray,
-    i: int,
-) -> Tuple[float, float]:
-    """Single projected coordinate update along coordinate i.
+# ----------------------------------------------------------------------
+# Numba-JIT kernel: single coordinate update
+# ----------------------------------------------------------------------
 
-    Returns (x_new, delta) where delta = x_new - x_old.
-    """
-    start, end = csr_indptr[i], csr_indptr[i + 1]
-    diag_val = 0.0
-    off_diag_sum = 0.0
-
-    for idx in range(start, end):
-        j = csr_indices[idx]
-        val = csr_data[idx]
+@njit(cache=True, fastmath=True)
+def _update_coord(i, x, indptr, indices, data, b, lo, hi):
+    s = 0.0
+    diag = 0.0
+    for k in range(indptr[i], indptr[i + 1]):
+        j = indices[k]
         if j == i:
-            diag_val = val
+            diag = data[k]
         else:
-            off_diag_sum += val * x[j]
-
-    if diag_val == 0.0:
-        return x[i], 0.0
-
-    x_old = x[i]
-    x_new = min(1.0, max(0.0, (b[i] - off_diag_sum) / diag_val))
-    return x_new, x_new - x_old
-
-
-@nb.njit(fastmath=True)
-def update_residual_incremental(
-    r: np.ndarray,
-    delta: float,
-    i: int,
-    csc_indptr: np.ndarray,
-    csc_indices: np.ndarray,
-    csc_data: np.ndarray,
-) -> None:
-    """Update residual vector r += delta * H[:, i] in O(deg(i)) time using CSC."""
-    if delta == 0.0:
-        return
-    for idx in range(csc_indptr[i], csc_indptr[i + 1]):
-        row_j = csc_indices[idx]
-        val = csc_data[idx]
-        r[row_j] += delta * val
+            s += data[k] * x[j]
+    if diag <= 0.0:
+        return x[i]
+    new_val = (b[i] - s) / diag
+    if new_val < lo[i]:
+        new_val = lo[i]
+    elif new_val > hi[i]:
+        new_val = hi[i]
+    return new_val
 
 
-@nb.njit(fastmath=True)
-def run_hybrid_priority_scheduler_optimized(
-    csr_indptr: np.ndarray,
-    csr_indices: np.ndarray,
-    csr_data: np.ndarray,
-    csc_indptr: np.ndarray,
-    csc_indices: np.ndarray,
-    csc_data: np.ndarray,
-    b: np.ndarray,
-    x_init: np.ndarray,
-    M: int,
-    epsilon: float,
-    max_sweeps: int,
-    tol: float,
-) -> Tuple[np.ndarray, int, float]:
-    """Algorithm 3: Hybrid Priority Scheduler with incremental residuals.
+@njit(cache=True, fastmath=True)
+def _residual_i(i, x, indptr, indices, data, b):
+    s = 0.0
+    for k in range(indptr[i], indptr[i + 1]):
+        s += data[k] * x[indices[k]]
+    return s - b[i]
 
-    Combines a mandatory cyclic backbone (every M iterations) with
-    aged residual priority updates (eq. 34).
+
+# ----------------------------------------------------------------------
+# Cyclic Gauss-Seidel
+# ----------------------------------------------------------------------
+
+def run_cyclic_gs_scheduler(
+    H,
+    b,
+    x0,
+    lo=None,
+    hi=None,
+    tol: float = 1e-6,
+    max_sweeps: int = 100_000,
+):
     """
-    n = len(b)
-    x = x_init.copy()
-    ages = np.zeros(n, dtype=np.int64)
-    r = np.zeros(n, dtype=np.float64)
+    Projected cyclic Gauss-Seidel.
 
-    # Initial residual r = Hx - b
+    Returns (x, updates, residual_inf).
+    """
+    n = H.shape[0]
+    H_csr = H.tocsr()
+    indptr = H_csr.indptr.astype(np.int64)
+    indices = H_csr.indices.astype(np.int64)
+    data = H_csr.data.astype(np.float64)
+
+    x = np.asarray(x0, dtype=np.float64).copy()
+    b = np.asarray(b, dtype=np.float64)
+    lo = np.full(n, -np.inf) if lo is None else np.asarray(lo, dtype=np.float64)
+    hi = np.full(n, np.inf) if hi is None else np.asarray(hi, dtype=np.float64)
+
+    updates = 0
+    for sweep in range(max_sweeps):
+        for i in range(n):
+            x[i] = _update_coord(i, x, indptr, indices, data, b, lo, hi)
+        updates += n
+        res = _residual_inf(x, indptr, indices, data, b)
+        if res < tol:
+            return x, updates, res
+    return x, updates, res
+
+
+@njit(cache=True, fastmath=True)
+def _residual_inf(x, indptr, indices, data, b):
+    n = x.shape[0]
+    m = 0.0
     for i in range(n):
         s = 0.0
-        for idx in range(csr_indptr[i], csr_indptr[i + 1]):
-            s += csr_data[idx] * x[csr_indices[idx]]
-        r[i] = s - b[i]
+        for k in range(indptr[i], indptr[i + 1]):
+            s += data[k] * x[indices[k]]
+        r = abs(s - b[i])
+        if r > m:
+            m = r
+    return m
 
+
+# ----------------------------------------------------------------------
+# Random priority (baseline)
+# ----------------------------------------------------------------------
+
+def run_random_priority_scheduler(
+    H,
+    b,
+    x0,
+    lo=None,
+    hi=None,
+    tol: float = 1e-6,
+    max_updates: int = 1_000_000,
+    seed: int = 0,
+):
+    """
+    Random priority queue: pop a uniformly random node each iteration.
+    """
+    n = H.shape[0]
+    H_csr = H.tocsr()
+    indptr = H_csr.indptr.astype(np.int64)
+    indices = H_csr.indices.astype(np.int64)
+    data = H_csr.data.astype(np.float64)
+
+    x = np.asarray(x0, dtype=np.float64).copy()
+    b = np.asarray(b, dtype=np.float64)
+    lo = np.full(n, -np.inf) if lo is None else np.asarray(lo, dtype=np.float64)
+    hi = np.full(n, np.inf) if hi is None else np.asarray(hi, dtype=np.float64)
+
+    rng = np.random.default_rng(seed)
+    updates = 0
+    for _ in range(max_updates):
+        i = int(rng.integers(0, n))
+        x[i] = _update_coord(i, x, indptr, indices, data, b, lo, hi)
+        updates += 1
+        if updates % n == 0:
+            res = _residual_inf(x, indptr, indices, data, b)
+            if res < tol:
+                return x, updates, res
+    res = _residual_inf(x, indptr, indices, data, b)
+    return x, updates, res
+
+
+# ----------------------------------------------------------------------
+# Hybrid priority (Algorithm 4)
+# ----------------------------------------------------------------------
+
+def run_hybrid_priority_scheduler_optimized(
+    indptr_csr,
+    indices_csr,
+    data_csr,
+    indptr_csc,
+    indices_csc,
+    data_csc,
+    b,
+    x0,
+    M: int,
+    epsilon: float = 1e-3,
+    tol: float = 1e-6,
+    max_sweeps: int = 100_000,
+    lo=None,
+    hi=None,
+):
+    """
+    Hybrid Priority Scheduler (Algorithm 4).
+
+    Alternates a mandatory cyclic backbone sweep every M iterations with
+    priority-queue updates driven by aged residual pi_i = |r_i| + epsilon*tau_i.
+
+    Parameters
+    ----------
+    indptr_csr, indices_csr, data_csr : CSR arrays of H_ext
+    indptr_csc, indices_csc, data_csc : CSC arrays of H_ext
+        (used for O(deg) residual recomputation on neighbors)
+    b : np.ndarray (n,)
+    x0 : np.ndarray (n,)
+    M : int
+        Cyclic backbone period (Theorem 9.1 uses M = n).
+    epsilon : float
+        Aging rate (eq. 9.1).
+    tol : float
+        Residual tolerance.
+    max_sweeps : int
+        Maximum number of iterations.
+
+    Returns
+    -------
+    x : np.ndarray
+    updates : int
+    residual_inf : float
+    """
+    n = b.shape[0]
+    x = np.asarray(x0, dtype=np.float64).copy()
+    b = np.asarray(b, dtype=np.float64)
+
+    lo_arr = np.full(n, -np.inf) if lo is None else np.asarray(lo, dtype=np.float64)
+    hi_arr = np.full(n, np.inf) if hi is None else np.asarray(hi, dtype=np.float64)
+
+    # Residuals
+    r = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        r[i] = _residual_i(i, x, indptr_csr, indices_csr, data_csr, b)
+
+    tau = np.zeros(n, dtype=np.int64)
+
+    # Initialize priority queue
+    pq = [(-abs(r[i]), i) for i in range(n)]
+    heapq.heapify(pq)
+
+    updates = 0
     k = 0
-    total_updates = 0
-    max_res = 0.0
 
-    while k < max_sweeps:
+    while updates < max_sweeps * n:
         if k % M == 0:
-            # Mandatory cyclic backbone sweep
+            # Cyclic backbone sweep
             for i in range(n):
-                x_new, delta = numba_coordinate_step(
-                    x, b, csr_indptr, csr_indices, csr_data, i
+                x[i] = _update_coord(
+                    i, x, indptr_csr, indices_csr, data_csr, b, lo_arr, hi_arr
                 )
-                x[i] = x_new
-                update_residual_incremental(
-                    r, delta, i, csc_indptr, csc_indices, csc_data
-                )
-                ages[i] = 0
-                total_updates += 1
+                tau[i] = 0
+            # Recompute residuals
+            for i in range(n):
+                r[i] = _residual_i(i, x, indptr_csr, indices_csr, data_csr, b)
+            updates += n
         else:
-            # Aged residual priority selection
-            max_prio = -1.0
-            target_node = 0
-            for i in range(n):
-                prio = abs(r[i]) + epsilon * float(ages[i])
-                if prio > max_prio:
-                    max_prio = prio
-                    target_node = i
-
-            i = target_node
-            x_new, delta = numba_coordinate_step(
-                x, b, csr_indptr, csr_indices, csr_data, i
+            if not pq:
+                pq = [(-(abs(r[i]) + epsilon * tau[i]), i) for i in range(n)]
+                heapq.heapify(pq)
+            _, i = heapq.heappop(pq)
+            x[i] = _update_coord(
+                i, x, indptr_csr, indices_csr, data_csr, b, lo_arr, hi_arr
             )
-            x[i] = x_new
-            update_residual_incremental(
-                r, delta, i, csc_indptr, csc_indices, csc_data
-            )
-            ages[i] = 0
-            total_updates += 1
+            tau[i] = 0
+            updates += 1
 
-        # Age increment
-        for i in range(n):
-            ages[i] += 1
+            # Recompute residual at i
+            r[i] = _residual_i(i, x, indptr_csr, indices_csr, data_csr, b)
+            heapq.heappush(pq, (-(abs(r[i]) + epsilon * tau[i]), i))
 
-        # Stopping criterion: infinity norm of residual (allocation-free)
-        max_res = 0.0
-        for i in range(n):
-            abs_r = abs(r[i])
-            if abs_r > max_res:
-                max_res = abs_r
+            # Push CSC neighbors (O(deg) residual recomputation)
+            for k_idx in range(indptr_csc[i], indptr_csc[i + 1]):
+                j = indices_csc[k_idx]
+                if j != i:
+                    r[j] = _residual_i(j, x, indptr_csr, indices_csr, data_csr, b)
+                    tau[j] += 1
+                    heapq.heappush(
+                        pq, (-(abs(r[j]) + epsilon * tau[j]), j)
+                    )
 
-        if max_res < tol:
-            break
         k += 1
 
-    return x, total_updates, max_res
+        if updates % n == 0:
+            res_inf = float(np.max(np.abs(r)))
+            if res_inf < tol:
+                return x, updates, res_inf
+
+    res_inf = float(np.max(np.abs(r)))
+    return x, updates, res_inf
+
+
+# ----------------------------------------------------------------------
+# Smoke test
+# ----------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import networkx as nx
+    from .core_graph import EpistemicGraph
+    from .hessian_builder import assemble_extended_hessian
+    from .cycle_basis import build_cycle_matrix_fundamental
+
+    n = 200
+    G_nx = nx.barabasi_albert_graph(n, 3, seed=0)
+    g = EpistemicGraph(num_nodes=n)
+    g.b = np.random.uniform(0, 1, size=n)
+    for u, v in G_nx.edges():
+        g.add_support_edge(u, v, 1.0)
+
+    Q_cyc = build_cycle_matrix_fundamental(g)
+    H = assemble_extended_hessian(g, gamma=0.05, Q_cycle=Q_cyc)
+    H_csr = H.tocsr()
+    H_csc = H.tocsc()
+
+    x0 = np.full(n, 0.5)
+
+    print("=== Cyclic GS ===")
+    x, updates, res = run_cyclic_gs_scheduler(H, g.b, x0, tol=1e-6)
+    print(f"  updates={updates}, res={res:.2e}")
+
+    print("=== Hybrid priority ===")
+    x, updates, res = run_hybrid_priority_scheduler_optimized(
+        H_csr.indptr, H_csr.indices, H_csr.data,
+        H_csc.indptr, H_csc.indices, H_csc.data,
+        g.b, x0,
+        M=n, epsilon=1e-3, tol=1e-6,
+    )
+    print(f"  updates={updates}, res={res:.2e}")
