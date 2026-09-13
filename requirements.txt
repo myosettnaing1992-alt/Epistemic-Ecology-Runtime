@@ -1,0 +1,18 @@
+# Core scientific stack
+numpy>=1.24.0,<2.0
+scipy>=1.10.0,<2.0
+networkx>=3.0,<4.0
+
+# JIT compilation
+numba>=0.57.0,<0.60
+
+# Parallelism & config
+joblib>=1.2.0,<2.0
+pyyaml>=6.0,<7.0
+
+# Visualization (experiments only)
+matplotlib>=3.7.0,<4.0
+
+# Testing
+pytest>=7.4.0,<9.0
+pytest-cov>=4.1.0,<6.0
