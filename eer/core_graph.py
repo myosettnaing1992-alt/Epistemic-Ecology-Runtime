@@ -28,14 +28,7 @@ EDGE_DERIVED_FROM = 2
 
 @dataclass
 class EpistemicGraph:
-    """
-    Directed epistemic multigraph with three disjoint edge types.
-
-    Parameters
-    ----------
-    num_nodes : int
-        Number of belief-holding agents.
-    """
+    """Directed epistemic multigraph with three disjoint edge types."""
 
     num_nodes: int
 
@@ -84,10 +77,6 @@ class EpistemicGraph:
         self._dst.append(v)
         self._weight.append(w)
         self._etype.append(EDGE_DERIVED_FROM)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _check_edge(self, u: int, v: int, w: float) -> None:
         if not (0 <= u < self.num_nodes) or not (0 <= v < self.num_nodes):
@@ -142,29 +131,36 @@ class EpistemicGraph:
     # ------------------------------------------------------------------
     # Symmetric Laplacians
     # ------------------------------------------------------------------
-    # FIX: previous implementation mis-constructed off-diagonal entries.
-    # We now compute L = D - A_sym explicitly using scipy.sparse.diags,
-    # which is guaranteed to be positive semi-definite.
+    # Convention (paper Eq. 2.3):
+    #     L_S = B_S W_S B_S^T
+    # Each stored directed edge (u, v, w) contributes:
+    #     L[u,u] += w;  L[v,v] += w
+    #     L[u,v] -= w;  L[v,u] -= w
+    # Equivalent to L = D - A_undir with A_undir = A + A^T.
+    #
+    # DO NOT use 0.5 * (A + A.T): that halves L relative to the paper.
     # ------------------------------------------------------------------
 
     def _symmetric_laplacian(self, A: csr_matrix) -> csr_matrix:
         n = self.num_nodes
         if A.nnz == 0:
             return csr_matrix((n, n), dtype=np.float64)
-        A_sym = (0.5 * (A + A.T)).tocsr()
-        A_sym.eliminate_zeros()
-        deg = np.asarray(A_sym.sum(axis=1)).ravel()
+
+        A_undir = (A + A.T).tocsr()
+        A_undir.eliminate_zeros()
+
+        deg = np.asarray(A_undir.sum(axis=1)).ravel()
         D = diags(deg, 0, format="csr")
-        L = (D - A_sym).tocsr()
+        L = (D - A_undir).tocsr()
         L.eliminate_zeros()
         return L
 
     def support_laplacian(self) -> csr_matrix:
-        """Symmetric support Laplacian L_S = D - A_sym."""
+        """Symmetric support Laplacian L_S = B_S W_S B_S^T."""
         return self._symmetric_laplacian(self.support_adjacency())
 
     def derived_from_laplacian(self) -> csr_matrix:
-        """Symmetric derived-from Laplacian L_D = D - A_sym."""
+        """Symmetric derived-from Laplacian L_D = B_D W_D B_D^T."""
         return self._symmetric_laplacian(self.derived_from_adjacency())
 
 
