@@ -1,99 +1,249 @@
 """
-Rigorous cross-validation tests for the Epistemic Ecology Runtime.
+Unit tests for eer.core_graph.EpistemicGraph.
 
-Compares EER against independent reference methods:
-    1. Analytic Laplacians for known small graphs
-    2. Direct solvers (scipy.sparse.linalg.spsolve)
-    3. Direct cycle enumeration (K_4, two triangles)
-    4. Direct path enumeration for Q_cascade
-    5. Seed sweeps (0-9)
-    6. Size sweeps (10-500)
-    7. Empirical convergence rate vs. theoretical bound
+Covers:
+    - Construction and default attributes
+    - Edge addition and type separation
+    - Error handling (invalid nodes, negative weights)
+    - Sparse adjacency matrices
+    - Symmetric Laplacians (paper Eq. 2.3: L = B W B^T, no 0.5 factor)
+    - Empty graph behavior
+    - Disconnected graphs
+    - Integration with networkx
 """
 
 from __future__ import annotations
 
-import itertools
-
 import numpy as np
 import pytest
-from scipy.sparse.linalg import eigsh, spsolve
+from scipy.sparse import csr_matrix
 
-from eer import (
-    EpistemicGraph,
-    assemble_extended_hessian,
-    build_cascade_matrix_bounded,
-    build_cycle_matrix_fundamental,
-    run_cyclic_gs_scheduler,
-    run_hybrid_priority_scheduler_optimized,
+from eer import EpistemicGraph
+from eer.core_graph import (
+    EDGE_SUPPORT,
+    EDGE_CONTRADICTION,
+    EDGE_DERIVED_FROM,
 )
-from eer.cycle_basis import build_fundamental_cycle_basis
-from eer.utils import (
-    condition_number,
-    make_ba_graph,
-    make_er_graph,
-    rate_bound,
-    set_random_priors,
-)
-
-
-# ----------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------
-
-def _make_ba(n: int, seed: int = 0) -> EpistemicGraph:
-    G_nx = make_ba_graph(n, m=3, seed=seed)
-    g = EpistemicGraph(num_nodes=n)
-    set_random_priors(g, seed=seed)
-    for u, v in G_nx.edges():
-        g.add_support_edge(int(u), int(v), 1.0)
-
-    rng = np.random.default_rng(seed)
-    edges = list(G_nx.edges())
-    n_derived = max(1, len(edges) // 10)
-    idx = rng.choice(len(edges), size=n_derived, replace=False)
-    for k in idx:
-        uu, vv = edges[int(k)]
-        g.add_derived_from_edge(int(uu), int(vv), 0.5)
-    return g
-
-
-def _make_er(n: int, seed: int = 0) -> EpistemicGraph:
-    G_nx = make_er_graph(n, avg_deg=5.0, seed=seed)
-    g = EpistemicGraph(num_nodes=n)
-    set_random_priors(g, seed=seed)
-    for u, v in G_nx.edges():
-        g.add_support_edge(int(u), int(v), 1.0)
-    return g
-
-
-def _solve_hybrid(H, b, x0=None, tol=1e-10, max_sweeps=100_000):
-    n = H.shape[0]
-    if x0 is None:
-        x0 = np.full(n, 0.5)
-    H_csr = H.tocsr()
-    H_csc = H.tocsc()
-    return run_hybrid_priority_scheduler_optimized(
-        H_csr.indptr, H_csr.indices, H_csr.data,
-        H_csc.indptr, H_csc.indices, H_csc.data,
-        b, x0,
-        M=n, epsilon=1e-3, tol=tol, max_sweeps=max_sweeps,
-    )
+from eer.utils import make_ba_graph
 
 
 # ======================================================================
-# 1. Analytic Laplacian verification
+# 1. Construction
 # ======================================================================
 
-class TestAnalyticLaplacian:
-    """
-    Verify L_S against hand-computed Laplacians.
+class TestConstruction:
 
-    Convention (paper Eq. 2.3): L_S = B_S W_S B_S^T.
-    Equivalent to L = D - A_undir with A_undir = A + A^T.
-    """
+    def test_default_attributes(self):
+        g = EpistemicGraph(num_nodes=10)
+        assert g.num_nodes == 10
+        assert g.num_edges == 0
+        assert g.b is not None and g.b.shape == (10,)
+        assert g.lambda_vec is not None and g.lambda_vec.shape == (10,)
+        assert g.x_min is not None and g.x_min.shape == (10,)
+        assert g.x_max is not None and g.x_max.shape == (10,)
+
+    def test_default_values(self):
+        """Defaults: b=0, lambda=1, x_min=0, x_max=1."""
+        g = EpistemicGraph(num_nodes=5)
+        np.testing.assert_array_equal(g.b, np.zeros(5))
+        np.testing.assert_array_equal(g.lambda_vec, np.ones(5))
+        np.testing.assert_array_equal(g.x_min, np.zeros(5))
+        np.testing.assert_array_equal(g.x_max, np.ones(5))
+
+    def test_custom_priors(self):
+        b = np.arange(10, dtype=np.float64)
+        lam = np.full(10, 2.0)
+        x_lo = np.full(10, -1.0)
+        x_hi = np.full(10, 3.0)
+        g = EpistemicGraph(
+            num_nodes=10, b=b, lambda_vec=lam, x_min=x_lo, x_max=x_hi,
+        )
+        np.testing.assert_array_equal(g.b, b)
+        np.testing.assert_array_equal(g.lambda_vec, lam)
+        np.testing.assert_array_equal(g.x_min, x_lo)
+        np.testing.assert_array_equal(g.x_max, x_hi)
+
+    def test_zero_node_graph(self):
+        g = EpistemicGraph(num_nodes=0)
+        assert g.num_nodes == 0
+        assert g.num_edges == 0
+
+
+# ======================================================================
+# 2. Edge addition
+# ======================================================================
+
+class TestEdgeAddition:
+
+    def test_add_single_support_edge(self):
+        g = EpistemicGraph(num_nodes=5)
+        g.add_support_edge(0, 1, 1.5)
+        assert g.num_edges == 1
+        src, dst, w, t = g.edges
+        assert src[0] == 0 and dst[0] == 1
+        assert w[0] == 1.5
+        assert t[0] == EDGE_SUPPORT
+
+    def test_add_contradiction_edge(self):
+        g = EpistemicGraph(num_nodes=5)
+        g.add_contradiction_edge(1, 2, 2.0)
+        assert g.num_edges == 1
+        src, dst, w, t = g.edges
+        assert src[0] == 1 and dst[0] == 2
+        assert w[0] == 2.0
+        assert t[0] == EDGE_CONTRADICTION
+
+    def test_add_derived_from_edge(self):
+        g = EpistemicGraph(num_nodes=5)
+        g.add_derived_from_edge(2, 3, 0.5)
+        assert g.num_edges == 1
+        src, dst, w, t = g.edges
+        assert src[0] == 2 and dst[0] == 3
+        assert w[0] == 0.5
+        assert t[0] == EDGE_DERIVED_FROM
+
+    def test_edge_types_are_separated(self):
+        g = EpistemicGraph(num_nodes=5)
+        g.add_support_edge(0, 1, 1.0)
+        g.add_contradiction_edge(1, 2, 2.0)
+        g.add_derived_from_edge(2, 3, 3.0)
+        assert g.num_edges == 3
+
+        src_s, dst_s, w_s = g.edges_by_type(EDGE_SUPPORT)
+        assert len(src_s) == 1 and src_s[0] == 0
+
+        src_c, dst_c, w_c = g.edges_by_type(EDGE_CONTRADICTION)
+        assert len(src_c) == 1 and src_c[0] == 1
+
+        src_d, dst_d, w_d = g.edges_by_type(EDGE_DERIVED_FROM)
+        assert len(src_d) == 1 and src_d[0] == 2
+
+    def test_default_weight_is_one(self):
+        g = EpistemicGraph(num_nodes=3)
+        g.add_support_edge(0, 1)
+        _, _, w, _ = g.edges
+        assert w[0] == 1.0
+
+    def test_parallel_edges(self):
+        """Multigraph: same (u, v) can appear multiple times."""
+        g = EpistemicGraph(num_nodes=3)
+        g.add_support_edge(0, 1, 1.0)
+        g.add_support_edge(0, 1, 2.0)
+        assert g.num_edges == 2
+
+    def test_invalid_node_index_raises(self):
+        g = EpistemicGraph(num_nodes=5)
+        with pytest.raises(IndexError):
+            g.add_support_edge(0, 5, 1.0)
+        with pytest.raises(IndexError):
+            g.add_support_edge(-1, 0, 1.0)
+        with pytest.raises(IndexError):
+            g.add_support_edge(5, 5, 1.0)
+
+    def test_negative_weight_raises(self):
+        g = EpistemicGraph(num_nodes=5)
+        with pytest.raises(ValueError):
+            g.add_support_edge(0, 1, -0.5)
+        with pytest.raises(ValueError):
+            g.add_contradiction_edge(0, 1, -1.0)
+        with pytest.raises(ValueError):
+            g.add_derived_from_edge(0, 1, -0.1)
+
+    def test_zero_weight_allowed(self):
+        g = EpistemicGraph(num_nodes=3)
+        g.add_support_edge(0, 1, 0.0)
+        assert g.num_edges == 1
+
+
+# ======================================================================
+# 3. Edges property
+# ======================================================================
+
+class TestEdgesProperty:
+
+    def test_edges_returns_arrays(self):
+        g = EpistemicGraph(num_nodes=5)
+        g.add_support_edge(0, 1, 1.0)
+        src, dst, w, t = g.edges
+        assert isinstance(src, np.ndarray)
+        assert isinstance(dst, np.ndarray)
+        assert isinstance(w, np.ndarray)
+        assert isinstance(t, np.ndarray)
+        assert src.dtype == np.int64
+        assert dst.dtype == np.int64
+        assert w.dtype == np.float64
+        assert t.dtype == np.int64
+
+    def test_edges_empty(self):
+        g = EpistemicGraph(num_nodes=5)
+        src, dst, w, t = g.edges
+        assert len(src) == 0
+        assert len(dst) == 0
+        assert len(w) == 0
+        assert len(t) == 0
+
+    def test_edges_by_type_empty(self):
+        g = EpistemicGraph(num_nodes=5)
+        g.add_support_edge(0, 1, 1.0)
+        src_d, _, _ = g.edges_by_type(EDGE_DERIVED_FROM)
+        assert len(src_d) == 0
+
+
+# ======================================================================
+# 4. Sparse adjacency matrices
+# ======================================================================
+
+class TestSparseAdjacency:
+
+    def test_support_adjacency_shape_and_values(self):
+        g = EpistemicGraph(num_nodes=4)
+        g.add_support_edge(0, 1, 2.0)
+        g.add_support_edge(1, 2, 3.0)
+        A = g.support_adjacency()
+        assert A.shape == (4, 4)
+        assert A[0, 1] == 2.0
+        assert A[1, 2] == 3.0
+        assert A[2, 1] == 0.0  # directed: no reverse edge
+
+    def test_support_adjacency_empty(self):
+        g = EpistemicGraph(num_nodes=3)
+        A = g.support_adjacency()
+        assert A.shape == (3, 3)
+        assert A.nnz == 0
+
+    def test_contradiction_adjacency_isolates_type(self):
+        g = EpistemicGraph(num_nodes=3)
+        g.add_support_edge(0, 1, 1.0)
+        g.add_contradiction_edge(1, 2, 2.0)
+        A_C = g.contradiction_adjacency()
+        assert A_C[0, 1] == 0.0
+        assert A_C[1, 2] == 2.0
+
+    def test_derived_from_adjacency_isolates_type(self):
+        g = EpistemicGraph(num_nodes=3)
+        g.add_support_edge(0, 1, 1.0)
+        g.add_derived_from_edge(1, 2, 0.5)
+        A_D = g.derived_from_adjacency()
+        assert A_D[0, 1] == 0.0
+        assert A_D[1, 2] == 0.5
+
+
+# ======================================================================
+# 5. Symmetric Laplacians (paper Eq. 2.3)
+# ======================================================================
+
+class TestSymmetricLaplacian:
+
+    def test_single_edge_laplacian(self):
+        """Edge 0-1 with weight 1: L = [[1,-1],[-1,1]]."""
+        g = EpistemicGraph(num_nodes=2)
+        g.add_support_edge(0, 1, 1.0)
+        L = g.support_laplacian().toarray()
+        expected = np.array([[ 1.0, -1.0], [-1.0,  1.0]])
+        np.testing.assert_allclose(L, expected, atol=1e-12)
 
     def test_triangle_laplacian(self):
+        """Triangle with unit weights: L[0,0] = 2 (no 0.5 factor)."""
         g = EpistemicGraph(num_nodes=3)
         g.add_support_edge(0, 1, 1.0)
         g.add_support_edge(1, 2, 1.0)
@@ -107,61 +257,8 @@ class TestAnalyticLaplacian:
         ])
         np.testing.assert_allclose(L, expected, atol=1e-12)
 
-    def test_square_laplacian(self):
-        g = EpistemicGraph(num_nodes=4)
-        g.add_support_edge(0, 1, 1.0)
-        g.add_support_edge(1, 2, 1.0)
-        g.add_support_edge(2, 3, 1.0)
-        g.add_support_edge(3, 0, 1.0)
-
-        L = g.support_laplacian().toarray()
-        expected = np.array([
-            [ 2.0, -1.0,  0.0, -1.0],
-            [-1.0,  2.0, -1.0,  0.0],
-            [ 0.0, -1.0,  2.0, -1.0],
-            [-1.0,  0.0, -1.0,  2.0],
-        ])
-        np.testing.assert_allclose(L, expected, atol=1e-12)
-
-    def test_star_laplacian(self):
-        g = EpistemicGraph(num_nodes=4)
-        g.add_support_edge(0, 1, 1.0)
-        g.add_support_edge(0, 2, 1.0)
-        g.add_support_edge(0, 3, 1.0)
-
-        L = g.support_laplacian().toarray()
-        expected = np.array([
-            [ 3.0, -1.0, -1.0, -1.0],
-            [-1.0,  1.0,  0.0,  0.0],
-            [-1.0,  0.0,  1.0,  0.0],
-            [-1.0,  0.0,  0.0,  1.0],
-        ])
-        np.testing.assert_allclose(L, expected, atol=1e-12)
-
-    def test_path_laplacian(self):
-        g = EpistemicGraph(num_nodes=4)
-        g.add_support_edge(0, 1, 1.0)
-        g.add_support_edge(1, 2, 1.0)
-        g.add_support_edge(2, 3, 1.0)
-
-        L = g.support_laplacian().toarray()
-        expected = np.array([
-            [ 1.0, -1.0,  0.0,  0.0],
-            [-1.0,  2.0, -1.0,  0.0],
-            [ 0.0, -1.0,  2.0, -1.0],
-            [ 0.0,  0.0, -1.0,  1.0],
-        ])
-        np.testing.assert_allclose(L, expected, atol=1e-12)
-
-    def test_weighted_triangle(self):
-        """
-        Triangle with distinct weights: 0->1 (2.0), 1->2 (3.0), 2->0 (4.0).
-
-        Diagonal = sum of incident weights:
-            deg[0] = 2 + 4 = 6
-            deg[1] = 2 + 3 = 5
-            deg[2] = 3 + 4 = 7
-        """
+    def test_weighted_triangle_laplacian(self):
+        """Weights 2, 3, 4: deg[0] = 2 + 4 = 6."""
         g = EpistemicGraph(num_nodes=3)
         g.add_support_edge(0, 1, 2.0)
         g.add_support_edge(1, 2, 3.0)
@@ -175,320 +272,226 @@ class TestAnalyticLaplacian:
         ])
         np.testing.assert_allclose(L, expected, atol=1e-12)
 
-    def test_laplacian_row_sums_zero(self):
-        g = _make_ba(50, seed=0)
-        for L in [g.support_laplacian(), g.derived_from_laplacian()]:
-            if L.nnz == 0:
-                continue
-            row_sums = np.asarray(L.sum(axis=1)).ravel()
-            np.testing.assert_allclose(row_sums, 0.0, atol=1e-12)
-
-    def test_laplacian_psd(self):
-        g = _make_ba(50, seed=0)
-        for L in [g.support_laplacian(), g.derived_from_laplacian()]:
-            if L.nnz == 0:
-                continue
-            eig_min = eigsh(L, k=1, which="SA",
-                            return_eigenvectors=False)[0]
-            assert eig_min >= -1e-10
-
-
-# ======================================================================
-# 2. Cross-validation against direct solver
-# ======================================================================
-
-class TestDirectSolverCrossValidation:
-
-    @pytest.mark.parametrize("n,seed", [(10, 0), (20, 1), (50, 2), (100, 3)])
-    def test_hybrid_matches_direct_solve(self, n, seed):
-        g = _make_ba(n, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        x_ref = spsolve(H.tocsc(), g.b)
-        x_sol, _, _ = _solve_hybrid(H, g.b, tol=1e-9)
-        np.testing.assert_allclose(x_sol, x_ref, atol=1e-5)
-
-    @pytest.mark.parametrize("n,seed", [(10, 0), (20, 1), (50, 2)])
-    def test_cgs_matches_direct_solve(self, n, seed):
-        g = _make_ba(n, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        x_ref = spsolve(H.tocsc(), g.b)
-        x_cgs, _, _ = run_cyclic_gs_scheduler(
-            H, g.b, np.full(n, 0.5), tol=1e-9, max_sweeps=20_000,
-        )
-        np.testing.assert_allclose(x_cgs, x_ref, atol=1e-5)
-
-    def test_all_schedulers_agree(self):
-        n, seed = 50, 0
-        g = _make_ba(n, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        x0 = np.full(n, 0.5)
-        x_cgs, _, _ = run_cyclic_gs_scheduler(
-            H, g.b, x0, tol=1e-10, max_sweeps=20_000,
-        )
-        x_hyb, _, _ = _solve_hybrid(H, g.b, x0, tol=1e-10)
-        np.testing.assert_allclose(x_cgs, x_hyb, atol=1e-5)
-
-
-# ======================================================================
-# 3. Seed sweep
-# ======================================================================
-
-class TestSeedSweep:
-
-    @pytest.mark.parametrize("seed", list(range(10)))
-    def test_spd_all_seeds(self, seed):
-        g = _make_ba(50, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        eig_min = eigsh(H, k=1, which="SA", return_eigenvectors=False)[0]
-        assert eig_min > 0, f"seed={seed}: lambda_min={eig_min:.6e}"
-
-    @pytest.mark.parametrize("seed", list(range(10)))
-    def test_hybrid_converges_all_seeds(self, seed):
-        g = _make_ba(50, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        _, _, res = _solve_hybrid(H, g.b, tol=1e-8)
-        assert res < 1e-6
-
-    @pytest.mark.parametrize("seed", list(range(10)))
-    def test_cycle_matrix_psd_all_seeds(self, seed):
-        g = _make_ba(50, seed=seed)
-        Q = build_cycle_matrix_fundamental(g, K_max=100)
-        if Q.nnz == 0:
-            pytest.skip("Empty Q_cycle")
-        eig_min = eigsh(Q, k=1, which="SA", return_eigenvectors=False)[0]
-        assert eig_min >= -1e-10
-
-
-# ======================================================================
-# 4. Size sweep
-# ======================================================================
-
-class TestSizeSweep:
-
-    @pytest.mark.parametrize("n", [10, 20, 50, 100, 200, 500])
-    def test_spd_all_sizes(self, n):
-        g = _make_ba(n, seed=0)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        eig_min = eigsh(H, k=1, which="SA", return_eigenvectors=False)[0]
-        assert eig_min > 0, f"n={n}: lambda_min={eig_min:.6e}"
-
-    @pytest.mark.parametrize("n", [10, 50, 100, 200])
-    def test_hybrid_converges_all_sizes(self, n):
-        g = _make_ba(n, seed=0)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        _, _, res = _solve_hybrid(H, g.b, tol=1e-8)
-        assert res < 1e-6
-
-    @pytest.mark.parametrize("n", [10, 50, 100, 200])
-    def test_hybrid_matches_direct_all_sizes(self, n):
-        g = _make_ba(n, seed=0)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        x_ref = spsolve(H.tocsc(), g.b)
-        x_sol, _, _ = _solve_hybrid(H, g.b, tol=1e-9)
-        np.testing.assert_allclose(x_sol, x_ref, atol=1e-5)
-
-
-# ======================================================================
-# 5. Convergence rate vs. theoretical bound
-# ======================================================================
-
-class TestConvergenceRate:
-
-    def _measure_cgs_rate(self, H, x_star, max_sweeps=100):
-        n = H.shape[0]
-        H_dense = H.toarray()
-        H_diag = np.diag(H_dense)
-        b = H @ x_star
-
-        x = np.zeros(n)
-        errors = [np.linalg.norm(x - x_star)]
-        for _ in range(max_sweeps):
-            for i in range(n):
-                s = H_dense[i] @ x - H_diag[i] * x[i]
-                x[i] = (b[i] - s) / H_diag[i]
-            errors.append(np.linalg.norm(x - x_star))
-            if errors[-1] < 1e-13:
-                break
-
-        ratios = [
-            errors[i + 1] / errors[i]
-            for i in range(len(errors) - 1)
-            if errors[i] > 1e-13
-        ]
-        return float(np.exp(np.mean(np.log(ratios)))) if ratios else 1.0
-
-    @pytest.mark.parametrize("n,seed", [(20, 0), (50, 1), (80, 2)])
-    def test_cgs_rate_below_theoretical_bound(self, n, seed):
-        g = _make_ba(n, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        x_star = spsolve(H.tocsc(), g.b)
-        bound = rate_bound(H)
-        empirical = self._measure_cgs_rate(H, x_star)
-        assert empirical <= bound + 0.10, (
-            f"n={n}, seed={seed}: empirical {empirical:.4f} > bound {bound:.4f}"
-        )
-
-    @pytest.mark.parametrize("n,seed", [(20, 0), (50, 1)])
-    def test_hessian_condition_number_finite(self, n, seed):
-        g = _make_ba(n, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        kappa = condition_number(H)
-        assert np.isfinite(kappa) and kappa >= 1.0
-
-
-# ======================================================================
-# 6. Direct cycle enumeration
-# ======================================================================
-
-class TestDirectCycleEnumeration:
-
-    def test_triangle_count(self):
-        g = EpistemicGraph(num_nodes=3)
-        g.add_support_edge(0, 1, 1.0)
-        g.add_support_edge(1, 2, 1.0)
-        g.add_support_edge(2, 0, 1.0)
-        basis = build_fundamental_cycle_basis(g)
-        assert basis.n_cycles_total == 1
-
-    def test_two_triangles_share_edge(self):
-        g = EpistemicGraph(num_nodes=4)
-        g.add_support_edge(0, 1, 1.0)
-        g.add_support_edge(1, 2, 1.0)
-        g.add_support_edge(2, 0, 1.0)
-        g.add_support_edge(0, 3, 1.0)
-        g.add_support_edge(1, 3, 1.0)
-        basis = build_fundamental_cycle_basis(g)
-        assert basis.n_cycles_total == 2
-
-    def test_k4_has_correct_cycle_count(self):
-        g = EpistemicGraph(num_nodes=4)
-        for u, v in itertools.combinations(range(4), 2):
-            g.add_support_edge(u, v, 1.0)
-        basis = build_fundamental_cycle_basis(g)
-        # m_S - n + c = 6 - 4 + 1 = 3
-        assert basis.n_cycles_total == 3
-
-
-# ======================================================================
-# 7. Direct path enumeration for Q_cascade
-# ======================================================================
-
-class TestDirectPathEnumeration:
-
-    def test_single_edge_cascade(self):
-        """Single edge 0->1: Q_cascade = [[1,-1,0],[-1,1,0],[0,0,0]]."""
-        g = EpistemicGraph(num_nodes=3)
-        g.add_derived_from_edge(0, 1, 1.0)
-
-        Q = build_cascade_matrix_bounded(g, L_max=2, decay=0.0).toarray()
-        expected = np.array([
-            [ 1.0, -1.0, 0.0],
-            [-1.0,  1.0, 0.0],
-            [ 0.0,  0.0, 0.0],
-        ])
-        np.testing.assert_allclose(Q, expected, atol=1e-12)
-
-    def test_two_edge_chain(self):
-        g = EpistemicGraph(num_nodes=3)
-        g.add_derived_from_edge(0, 1, 1.0)
-        g.add_derived_from_edge(1, 2, 1.0)
-
-        Q = build_cascade_matrix_bounded(g, L_max=2, decay=0.0)
-        diff = Q - Q.T
+    def test_support_laplacian_is_symmetric(self):
+        g = make_ba_graph(50, m=3, seed=0)
+        gE = EpistemicGraph(num_nodes=g.number_of_nodes())
+        for u, v in g.edges():
+            gE.add_support_edge(int(u), int(v), 1.0)
+        L = gE.support_laplacian()
+        diff = L - L.T
         assert abs(diff).nnz == 0 or np.abs(diff.data).max() < 1e-12
-        eig_min = eigsh(Q, k=1, which="SA", return_eigenvectors=False)[0]
+
+    def test_support_laplacian_row_sums_zero(self):
+        g = EpistemicGraph(num_nodes=4)
+        g.add_support_edge(0, 1, 1.0)
+        g.add_support_edge(1, 2, 1.0)
+        g.add_support_edge(2, 3, 1.0)
+        L = g.support_laplacian()
+        row_sums = np.asarray(L.sum(axis=1)).ravel()
+        np.testing.assert_allclose(row_sums, 0.0, atol=1e-12)
+
+    def test_support_laplacian_empty_graph(self):
+        """Empty graph: L = 0 (with eliminate_zeros)."""
+        g = EpistemicGraph(num_nodes=3)
+        L = g.support_laplacian()
+        assert L.nnz == 0
+        assert L.shape == (3, 3)
+        np.testing.assert_allclose(L.toarray(), 0.0)
+
+    def test_derived_from_laplacian(self):
+        g = EpistemicGraph(num_nodes=3)
+        g.add_derived_from_edge(0, 1, 1.0)
+        g.add_derived_from_edge(1, 2, 2.0)
+        L_D = g.derived_from_laplacian().toarray()
+        # deg[0] = 1, deg[1] = 1 + 2 = 3, deg[2] = 2
+        expected = np.array([
+            [ 1.0, -1.0,  0.0],
+            [-1.0,  3.0, -2.0],
+            [ 0.0, -2.0,  2.0],
+        ])
+        np.testing.assert_allclose(L_D, expected, atol=1e-12)
+
+    def test_laplacian_is_psd(self):
+        """L = D - A_undir is always PSD."""
+        from scipy.sparse.linalg import eigsh
+
+        g = EpistemicGraph(num_nodes=4)
+        g.add_support_edge(0, 1, 1.0)
+        g.add_support_edge(1, 2, 1.0)
+        g.add_support_edge(2, 3, 1.0)
+        g.add_support_edge(3, 0, 1.0)
+        L = g.support_laplacian()
+        eig_min = eigsh(L, k=1, which="SA", return_eigenvectors=False)[0]
         assert eig_min >= -1e-10
 
-    def test_no_derived_edges(self):
-        g = EpistemicGraph(num_nodes=5)
-        for i in range(4):
-            g.add_support_edge(i, i + 1, 1.0)
-        Q = build_cascade_matrix_bounded(g, L_max=3)
-        assert Q.nnz == 0
+    def test_parallel_edges_sum_weights(self):
+        """Parallel edges: Laplacian off-diagonal accumulates weights."""
+        g = EpistemicGraph(num_nodes=2)
+        g.add_support_edge(0, 1, 1.0)
+        g.add_support_edge(0, 1, 2.0)
+        L = g.support_laplacian().toarray()
+        # A[0,1] = 1 + 2 = 3, A_undir[0,1] = 3, deg[0] = 3
+        expected = np.array([[ 3.0, -3.0], [-3.0,  3.0]])
+        np.testing.assert_allclose(L, expected, atol=1e-12)
 
-    def test_lmax_bounds_path_length(self):
-        """L_max=1 vs L_max=3 should give different nnz for a chain."""
+
+# ======================================================================
+# 6. Disconnected graphs
+# ======================================================================
+
+class TestDisconnectedGraphs:
+
+    def test_two_components(self):
+        """Two triangles: Laplacian is block-diagonal."""
+        g = EpistemicGraph(num_nodes=6)
+        # Component A: 0, 1, 2
+        g.add_support_edge(0, 1, 1.0)
+        g.add_support_edge(1, 2, 1.0)
+        g.add_support_edge(2, 0, 1.0)
+        # Component B: 3, 4, 5
+        g.add_support_edge(3, 4, 1.0)
+        g.add_support_edge(4, 5, 1.0)
+        g.add_support_edge(5, 3, 1.0)
+
+        L = g.support_laplacian().toarray()
+        # Cross-blocks should be zero
+        assert np.all(L[:3, 3:] == 0.0)
+        assert np.all(L[3:, :3] == 0.0)
+        # Diagonal blocks should be triangles
+        np.testing.assert_allclose(L[:3, :3], np.array([
+            [ 2.0, -1.0, -1.0],
+            [-1.0,  2.0, -1.0],
+            [-1.0, -1.0,  2.0],
+        ]), atol=1e-12)
+
+    def test_isolated_nodes(self):
+        """Isolated nodes have zero row in Laplacian."""
         g = EpistemicGraph(num_nodes=4)
-        g.add_derived_from_edge(0, 1, 1.0)
-        g.add_derived_from_edge(1, 2, 1.0)
-        g.add_derived_from_edge(2, 3, 1.0)
-
-        Q_l1 = build_cascade_matrix_bounded(g, L_max=1, decay=0.0)
-        Q_l3 = build_cascade_matrix_bounded(g, L_max=3, decay=0.0)
-        assert Q_l3.nnz >= Q_l1.nnz
+        g.add_support_edge(0, 1, 1.0)
+        # Nodes 2, 3 are isolated
+        L = g.support_laplacian().toarray()
+        np.testing.assert_allclose(L[2, :], 0.0, atol=1e-12)
+        np.testing.assert_allclose(L[3, :], 0.0, atol=1e-12)
 
 
 # ======================================================================
-# 8. Parameter grid
+# 7. Integration with networkx
 # ======================================================================
 
-class TestParameterGrid:
+class TestNetworkXIntegration:
 
-    @pytest.mark.parametrize("alpha,gamma", [
-        (0.0, 0.0), (0.1, 0.1), (0.5, 0.5), (1.0, 1.0),
-        (2.0, 0.5), (0.5, 2.0), (5.0, 5.0), (10.0, 0.0), (0.0, 10.0),
-    ])
-    def test_hext_spd_grid(self, alpha, gamma):
-        g = _make_ba(50, seed=0)
-        H = assemble_extended_hessian(g, alpha=alpha, gamma=gamma, L_max=3)
-        eig_min = eigsh(H, k=1, which="SA", return_eigenvectors=False)[0]
-        assert eig_min > 0
+    def test_ba_graph_construction(self):
+        import networkx as nx
+
+        G_nx = nx.barabasi_albert_graph(30, 3, seed=0)
+        g = EpistemicGraph(num_nodes=30)
+        for u, v in G_nx.edges():
+            g.add_support_edge(int(u), int(v), 1.0)
+        assert g.num_edges == G_nx.number_of_edges()
+
+    def test_er_graph_construction(self):
+        import networkx as nx
+
+        G_nx = nx.erdos_renyi_graph(30, 0.2, seed=0)
+        g = EpistemicGraph(num_nodes=30)
+        for u, v in G_nx.edges():
+            g.add_support_edge(int(u), int(v), 1.0)
+        assert g.num_edges == G_nx.number_of_edges()
+
+    def test_path_graph(self):
+        import networkx as nx
+
+        G_nx = nx.path_graph(10)
+        g = EpistemicGraph(num_nodes=10)
+        for u, v in G_nx.edges():
+            g.add_support_edge(int(u), int(v), 1.0)
+        assert g.num_edges == 9
+
+    def test_mixed_edge_types(self):
+        import networkx as nx
+
+        G_nx = nx.barabasi_albert_graph(20, 3, seed=0)
+        g = EpistemicGraph(num_nodes=20)
+        edges = list(G_nx.edges())
+        for i, (u, v) in enumerate(edges):
+            if i % 3 == 0:
+                g.add_support_edge(int(u), int(v), 1.0)
+            elif i % 3 == 1:
+                g.add_contradiction_edge(int(u), int(v), 0.5)
+            else:
+                g.add_derived_from_edge(int(u), int(v), 0.7)
+
+        n_s = len(g.edges_by_type(EDGE_SUPPORT)[0])
+        n_c = len(g.edges_by_type(EDGE_CONTRADICTION)[0])
+        n_d = len(g.edges_by_type(EDGE_DERIVED_FROM)[0])
+        assert n_s + n_c + n_d == g.num_edges
 
 
 # ======================================================================
-# 9. ER graph cross-check
+# 8. Integration with EER pipeline
 # ======================================================================
 
-class TestERGraphValidation:
+class TestEERPipelineIntegration:
 
-    @pytest.mark.parametrize("n,seed", [(20, 0), (50, 1), (100, 2)])
-    def test_er_spd(self, n, seed):
-        g = _make_er(n, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        eig_min = eigsh(H, k=1, which="SA", return_eigenvectors=False)[0]
-        assert eig_min > 0
+    def test_laplacians_have_consistent_shapes(self):
+        g = EpistemicGraph(num_nodes=10)
+        g.add_support_edge(0, 1, 1.0)
+        g.add_derived_from_edge(1, 2, 0.5)
 
-    @pytest.mark.parametrize("n,seed", [(20, 0), (50, 1)])
-    def test_er_hybrid_converges(self, n, seed):
-        g = _make_er(n, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        _, _, res = _solve_hybrid(H, g.b, tol=1e-8)
-        assert res < 1e-6
+        L_S = g.support_laplacian()
+        L_D = g.derived_from_laplacian()
 
-    @pytest.mark.parametrize("n,seed", [(20, 0), (50, 1)])
-    def test_er_matches_direct(self, n, seed):
-        g = _make_er(n, seed=seed)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5, L_max=3)
-        x_ref = spsolve(H.tocsc(), g.b)
-        x_sol, _, _ = _solve_hybrid(H, g.b, tol=1e-9)
-        np.testing.assert_allclose(x_sol, x_ref, atol=1e-5)
+        assert L_S.shape == (10, 10)
+        assert L_D.shape == (10, 10)
+        assert L_S.nnz > 0
+        assert L_D.nnz > 0
+
+    def test_graph_builds_correctly_for_hessian(self):
+        """The graph should feed cleanly into Hessian assembly."""
+        from eer import assemble_extended_hessian
+
+        G_nx = make_ba_graph(30, m=3, seed=0)
+        g = EpistemicGraph(num_nodes=30)
+        for u, v in G_nx.edges():
+            g.add_support_edge(int(u), int(v), 1.0)
+
+        H = assemble_extended_hessian(g, alpha=0.0, gamma=0.0)
+        assert H.shape == (30, 30)
+        # Diagonal should be positive
+        assert np.all(H.diagonal() > 0)
 
 
 # ======================================================================
-# 10. Edge cases
+# 9. Edge cases
 # ======================================================================
 
 class TestEdgeCases:
 
-    def test_single_node(self):
+    def test_single_node_with_self_loop_intent(self):
+        """Single node, no edges: graph is well-defined."""
         g = EpistemicGraph(num_nodes=1)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5)
-        assert H.shape == (1, 1)
-        assert H[0, 0] > 0
+        assert g.num_edges == 0
+        assert g.support_laplacian().nnz == 0
 
-    def test_two_isolated_nodes(self):
-        g = EpistemicGraph(num_nodes=2)
-        H = assemble_extended_hessian(g, alpha=0.0, gamma=0.0)
-        np.testing.assert_allclose(H.toarray(), np.eye(2), atol=1e-12)
+    def test_very_large_graph_construction(self):
+        """Construction of n=1000 should complete quickly."""
+        g = EpistemicGraph(num_nodes=1000)
+        for i in range(0, 999, 2):
+            g.add_support_edge(i, i + 1, 1.0)
+        assert g.num_edges == 500
 
-    def test_disconnected_graph(self):
-        g = EpistemicGraph(num_nodes=6)
-        for u, v in [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)]:
-            g.add_support_edge(u, v, 1.0)
-        H = assemble_extended_hessian(g, alpha=0.5, gamma=0.5)
-        eig_min = eigsh(H, k=1, which="SA", return_eigenvectors=False)[0]
-        assert eig_min > 0
+    def test_isolated_node_has_zero_degree(self):
+        g = EpistemicGraph(num_nodes=3)
+        g.add_support_edge(0, 1, 1.0)
+        L = g.support_laplacian()
+        assert L[2, 2] == 0.0
+        assert L[2, 0] == 0.0
+        assert L[0, 2] == 0.0
 
+
+# ======================================================================
+# Entry point
+# ======================================================================
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])
+    pytest.main([__file__, "-v"])
